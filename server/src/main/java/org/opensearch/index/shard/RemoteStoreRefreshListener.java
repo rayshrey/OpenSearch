@@ -250,6 +250,12 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                     Map<String, Long> localSegmentsSizeMap = updateLocalSizeMapAndTracker(localSegmentsPostRefresh).entrySet()
                         .stream()
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+                    Collection<String> segmentsToRefresh = localSegmentsPostRefresh.stream()
+                        .filter(file -> !skipUpload(file))
+                        .collect(Collectors.toList());
+                    Directory directory = ((FilterDirectory) (((FilterDirectory) storeDirectory).getDelegate())).getDelegate();
+
                     CountDownLatch latch = new CountDownLatch(1);
                     ActionListener<Void> segmentUploadsCompletedListener = new LatchedActionListener<>(new ActionListener<>() {
                         @Override
@@ -271,6 +277,9 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                                 // At this point since we have uploaded new segments, segment infos and segment metadata file,
                                 // along with marking minSeqNoToKeep, upload has succeeded completely.
                                 successful.set(true);
+                                if (directory instanceof CompositeDirectory) {
+                                    ((CompositeDirectory) directory).afterSyncToRemote(segmentsToRefresh);
+                                }
                             } catch (Exception e) {
                                 // We don't want to fail refresh if upload of new segments fails. The missed segments will be re-tried
                                 // as part of exponential back-off retry logic. This should not affect durability of the indexed data
@@ -285,15 +294,8 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                         }
                     }, latch);
 
-                    Collection<String> segmentsToRefresh = localSegmentsPostRefresh.stream()
-                        .filter(file -> !skipUpload(file))
-                        .collect(Collectors.toList());
                     // Start the segments files upload
                     uploadNewSegments(localSegmentsPostRefresh, localSegmentsSizeMap, segmentUploadsCompletedListener);
-                    Directory directory = ((FilterDirectory) (((FilterDirectory) storeDirectory).getDelegate())).getDelegate();
-                    if (directory instanceof CompositeDirectory) {
-                        ((CompositeDirectory) directory).afterSyncToRemote(segmentsToRefresh);
-                    }
                     latch.await();
                 } catch (EngineException e) {
                     logger.warn("Exception while reading SegmentInfosSnapshot", e);
