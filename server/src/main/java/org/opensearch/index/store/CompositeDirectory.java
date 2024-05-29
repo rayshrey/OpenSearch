@@ -212,9 +212,8 @@ public class CompositeDirectory extends FilterDirectory {
         }
         // If file has been uploaded to the Remote Store, fetch it from the Remote Store in blocks via OnDemandCompositeBlockIndexInput
         else {
-            logger.trace("Complete file not in FileCache, to be fetched in Blocks from Remote");
-            RemoteSegmentMetadata remoteSegmentMetadata = remoteDirectory.readLatestMetadataFile();
-            RemoteSegmentStoreDirectory.UploadedSegmentMetadata uploadedSegmentMetadata = remoteSegmentMetadata.getMetadata().get(name);
+            logger.trace("Complete file not in FileCache, to be fetched in Blocks from Remote {}", name);
+            RemoteSegmentStoreDirectory.UploadedSegmentMetadata uploadedSegmentMetadata = remoteDirectory.getSegmentsUploadedToRemoteStore().get(name);
             // TODO : Refactor FileInfo and OnDemandBlockSnapshotIndexInput to more generic names as they are not Remote Snapshot specific
             BlobStoreIndexShardSnapshot.FileInfo fileInfo = new BlobStoreIndexShardSnapshot.FileInfo(
                 name,
@@ -233,7 +232,6 @@ public class CompositeDirectory extends FilterDirectory {
     public void close() throws IOException {
         Arrays.stream(localDirectory.listAll()).forEach(f -> fileCache.remove(localDirectory.getDirectory().resolve(f)));
         localDirectory.close();
-        remoteDirectory.close();
     }
 
     /**
