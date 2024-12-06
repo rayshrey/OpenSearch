@@ -34,8 +34,12 @@ package org.opensearch.search.fetch;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.ReaderUtil;
+import org.apache.lucene.index.SortedNumericDocValues;
+import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
@@ -43,26 +47,38 @@ import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.BitSet;
+import org.apache.lucene.util.BytesRef;
 import org.opensearch.common.CheckedBiConsumer;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.document.DocumentField;
 import org.opensearch.common.lucene.index.SequentialStoredFieldsLeafReader;
 import org.opensearch.common.lucene.search.Queries;
+import org.opensearch.common.xcontent.XContentFactory;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.common.xcontent.XContentType;
 import org.opensearch.common.xcontent.support.XContentMapValues;
+import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.core.common.text.Text;
 import org.opensearch.core.tasks.TaskCancelledException;
 import org.opensearch.core.xcontent.MediaType;
+import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.fielddata.LeafNumericFieldData;
+import org.opensearch.index.fielddata.SortedNumericDoubleValues;
 import org.opensearch.index.fieldvisitor.CustomFieldsVisitor;
 import org.opensearch.index.fieldvisitor.FieldsVisitor;
 import org.opensearch.index.mapper.DocumentMapper;
+import org.opensearch.index.mapper.FieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
+import org.opensearch.index.mapper.Mapper;
 import org.opensearch.index.mapper.MapperService;
+import org.opensearch.index.mapper.MetadataFieldMapper;
+import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.ObjectMapper;
 import org.opensearch.index.mapper.SourceFieldMapper;
+import org.opensearch.index.shard.IndexShard;
+import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.SearchContextSourcePrinter;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
@@ -86,6 +102,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import static java.util.Collections.emptyMap;
 
@@ -351,9 +368,127 @@ public class FetchPhase {
             HitContext hitContext = new HitContext(hit, subReaderContext, subDocId, lookup.source());
             if (fieldsVisitor.source() != null) {
                 hitContext.sourceLookup().setSource(fieldsVisitor.source());
+                Map<String, Object> sourceAsMap = buildUsingDocValues(docId, subReaderContext.reader(), context.mapperService(), context.indexShard());
+                sourceAsMap = unflatten(sourceAsMap);
+                try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
+                    builder.map(sourceAsMap);
+                    hitContext.sourceLookup().setSource(BytesReference.bytes(builder));
+                }
             }
             return hitContext;
         }
+    }
+
+    private static Map<String, Object> unflatten(Map<String, Object> flattened) {
+        Map<String, Object> unflattened = new HashMap<>();
+        for (String key : flattened.keySet()) {
+            doUnflatten(flattened, unflattened, key, flattened.get(key));
+        }
+        return unflattened;
+    }
+
+    private static Map<String, Object> doUnflatten(
+        Map<String, Object> flattened,
+        Map<String, Object> unflattened,
+        String key,
+        Object value) {
+
+        String[] parts = key.split("\\.");
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            Object current = flattened.get(part);
+            if (i == (parts.length - 1)) {
+                unflattened.put(part, value);
+            } else if (current == null) {
+                if ((current = unflattened.get(part)) == null) {
+                    current = new HashMap<>();
+                }
+                unflattened.put(part, current);
+                unflattened = (Map<String, Object>) current;
+            } else if (current instanceof Map) {
+                unflattened.put(part, current);
+                unflattened = (Map<String, Object>) current;
+            }
+        }
+        return unflattened;
+    }
+
+    private static Map<String, Object> buildUsingDocValues(int docId, LeafReader reader, MapperService mapperService, IndexShard indexShard) throws IOException {
+        Map<String, Object> docValues = new HashMap<>();
+        for (Mapper mapper: mapperService.documentMapper().mappers()) {
+            if (mapper instanceof MetadataFieldMapper) {
+                continue;
+            }
+            mapper.name();
+            if (mapper instanceof FieldMapper) {
+                FieldMapper fieldMapper = (FieldMapper) mapper;
+                if (fieldMapper.fieldType().hasDocValues()) {
+                    String fieldName = fieldMapper.name();
+                    FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(fieldName);
+                    DocValueFormat format = fieldMapper.fieldType().docValueFormat(null, null);
+                    if (fieldInfo != null) {
+                        switch (fieldInfo.getDocValuesType()) {
+                            case SORTED_SET:
+                                SortedSetDocValues dv = reader.getSortedSetDocValues(fieldName);
+                                if (dv.advanceExact(docId)) {
+                                    BytesRef[] values = new BytesRef[dv.docValueCount()];
+                                    for (int i = 0; i < dv.docValueCount(); i++) {
+                                        values[i] = dv.lookupOrd(dv.nextOrd());
+                                    }
+                                    if (values.length > 1) {
+                                        docValues.put(fieldName, Arrays.stream(values).map(format::format).collect(Collectors.toList()));
+                                    } else {
+                                        docValues.put(fieldName, format.format(values[0]));
+                                    }
+                                }
+                                break;
+                            case SORTED_NUMERIC:
+                                SortedNumericDocValues sndv = reader.getSortedNumericDocValues(fieldName);
+                                if (fieldMapper instanceof NumberFieldMapper) {
+                                    NumberFieldMapper.NumberType numberType = ((NumberFieldMapper) fieldMapper).getType();
+                                    switch (numberType) {
+                                        case HALF_FLOAT:
+                                        case FLOAT:
+                                        case DOUBLE:
+                                            SortedNumericDoubleValues doubleValues = ((LeafNumericFieldData) indexShard.indexFieldDataService().getForField(fieldMapper.fieldType(), "", () -> null)
+                                                .load(reader.getContext())).getDoubleValues();
+                                            if (doubleValues.advanceExact(docId)) {
+                                                int size = doubleValues.docValueCount();
+                                                double[] vals = new double[size];
+                                                for (int i = 0; i < size; i++) {
+                                                    vals[i] = doubleValues.nextValue();
+                                                }
+                                                if (size > 1) {
+                                                    docValues.put(fieldName, vals);
+                                                } else {
+                                                    docValues.put(fieldName, vals[0]);
+                                                }
+                                            }
+                                            break;
+                                        case INTEGER:
+                                        case LONG:
+                                        case UNSIGNED_LONG:
+                                            if (sndv.advanceExact(docId)) {
+                                                int size = sndv.docValueCount();
+                                                long[] vals = new long[size];
+                                                for (int i = 0; i < size; i++) {
+                                                    vals[i] = sndv.nextValue();
+                                                }
+                                                if (size > 1) {
+                                                    docValues.put(fieldName, vals);
+                                                } else {
+                                                    docValues.put(fieldName, vals[0]);
+                                                }
+                                            }
+                                    }
+                                }
+                                break;
+                        }
+                    }
+                }
+            }
+        }
+        return docValues;
     }
 
     /**

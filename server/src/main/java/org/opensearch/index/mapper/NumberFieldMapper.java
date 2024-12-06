@@ -1817,4 +1817,8 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
     public ParametrizedFieldMapper.Builder getMergeBuilder() {
         return new Builder(simpleName(), type, ignoreMalformedByDefault, coerceByDefault).init(this);
     }
+
+    public NumberType getType() {
+        return type;
+    }
 }
