@@ -77,6 +77,7 @@ import org.opensearch.index.mapper.MetadataFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.ObjectMapper;
 import org.opensearch.index.mapper.SourceFieldMapper;
+import org.opensearch.index.recovery.RemoteStoreRestoreService;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.SearchContextSourcePrinter;
@@ -117,10 +118,12 @@ public class FetchPhase {
     private static final Logger LOGGER = LogManager.getLogger(FetchPhase.class);
 
     private final FetchSubPhase[] fetchSubPhases;
+    private static final Logger logger = LogManager.getLogger(FetchPhase.class);
 
     public FetchPhase(List<FetchSubPhase> fetchSubPhases) {
         this.fetchSubPhases = fetchSubPhases.toArray(new FetchSubPhase[fetchSubPhases.size() + 1]);
         this.fetchSubPhases[fetchSubPhases.size()] = new InnerHitsPhase(this);
+
     }
 
     public void execute(SearchContext context) {
@@ -368,11 +371,15 @@ public class FetchPhase {
             HitContext hitContext = new HitContext(hit, subReaderContext, subDocId, lookup.source());
             //if (fieldsVisitor.source() != null) {
             hitContext.sourceLookup().setSource(fieldsVisitor.source());
-            Map<String, Object> sourceAsMap = buildUsingDocValues(docId, subReaderContext.reader(), context.mapperService(), context.indexShard());
-            sourceAsMap = unflatten(sourceAsMap);
-            try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
-                builder.map(sourceAsMap);
-                hitContext.sourceLookup().setSource(BytesReference.bytes(builder));
+            try {
+                Map<String, Object> sourceAsMap = buildUsingDocValues(docId, subReaderContext.reader(), context.mapperService(), context.indexShard());
+                sourceAsMap = unflatten(sourceAsMap);
+                try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
+                    builder.map(sourceAsMap);
+                    hitContext.sourceLookup().setSource(BytesReference.bytes(builder));
+                }
+            } catch (Exception e) {
+                logger.error("Error while building source from doc values", e);
             }
             //}
             return hitContext;

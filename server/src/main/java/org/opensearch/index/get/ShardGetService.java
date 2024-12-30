@@ -436,8 +436,9 @@ public final class ShardGetService extends AbstractIndexShardComponent {
                 builder.map(sourceAsMap);
                 source = BytesReference.bytes(builder);
             }
-        } catch (IOException ex) {
-            throw new RuntimeException(ex);
+        } catch (Exception ex) {
+            logger.error("Error while building source from doc values", ex);
+            //throw new RuntimeException(ex);
         }
 
 
