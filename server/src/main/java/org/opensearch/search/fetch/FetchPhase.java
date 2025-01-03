@@ -54,6 +54,7 @@ import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.document.DocumentField;
 import org.opensearch.common.lucene.index.SequentialStoredFieldsLeafReader;
 import org.opensearch.common.lucene.search.Queries;
+import org.opensearch.common.time.DateFormatter;
 import org.opensearch.common.xcontent.XContentFactory;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.common.xcontent.XContentType;
@@ -68,6 +69,7 @@ import org.opensearch.index.fielddata.LeafNumericFieldData;
 import org.opensearch.index.fielddata.SortedNumericDoubleValues;
 import org.opensearch.index.fieldvisitor.CustomFieldsVisitor;
 import org.opensearch.index.fieldvisitor.FieldsVisitor;
+import org.opensearch.index.mapper.DateFieldMapper;
 import org.opensearch.index.mapper.DocumentMapper;
 import org.opensearch.index.mapper.FieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
@@ -487,6 +489,20 @@ public class FetchPhase {
                                                     docValues.put(fieldName, vals[0]);
                                                 }
                                             }
+                                    }
+                                } else if (fieldMapper instanceof DateFieldMapper) {
+                                    DateFormatter dateFormatter = ((DateFieldMapper) fieldMapper).fieldType().dateTimeFormatter();
+                                    if (sndv.advanceExact(docId)) {
+                                        int size = sndv.docValueCount();
+                                        String[] vals = new String[size];
+                                        for (int i = 0; i < size; i++) {
+                                            vals[i] = dateFormatter.formatMillis(sndv.nextValue());
+                                        }
+                                        if (size > 1) {
+                                            docValues.put(fieldName, vals);
+                                        } else {
+                                            docValues.put(fieldName, vals[0]);
+                                        }
                                     }
                                 }
                                 break;
