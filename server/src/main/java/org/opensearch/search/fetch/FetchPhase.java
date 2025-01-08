@@ -79,7 +79,6 @@ import org.opensearch.index.mapper.MetadataFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.ObjectMapper;
 import org.opensearch.index.mapper.SourceFieldMapper;
-import org.opensearch.index.recovery.RemoteStoreRestoreService;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.SearchContextSourcePrinter;
@@ -382,6 +381,13 @@ public class FetchPhase {
                 }
             } catch (Exception e) {
                 logger.error("Error while building source from doc values", e);
+                logger.info("Original Source : \n");
+                try {
+                    Map<String, Object> originalSource = XContentHelper.convertToMap(fieldsVisitor.source(), false).v2();
+                    originalSource.forEach((k, v) -> logger.info("{ " + k + " : " + v.toString() + " }"));
+                } catch (Exception ex) {
+                    logger.error("Error while logging original source values", ex);
+                }
             }
             //}
             return hitContext;
@@ -465,7 +471,12 @@ public class FetchPhase {
                                                 int size = doubleValues.docValueCount();
                                                 double[] vals = new double[size];
                                                 for (int i = 0; i < size; i++) {
-                                                    vals[i] = doubleValues.nextValue();
+                                                    try {
+                                                        vals[i] = doubleValues.nextValue();
+                                                    } catch (Exception e) {
+                                                        logger.info("Exception while reading value from SNDV\nDoc Id : " + docId + ", DocValueCountSize : " + size + ", i : " + i);
+                                                        throw e;
+                                                    }
                                                 }
                                                 if (size > 1) {
                                                     docValues.put(fieldName, vals);
@@ -481,7 +492,12 @@ public class FetchPhase {
                                                 int size = sndv.docValueCount();
                                                 long[] vals = new long[size];
                                                 for (int i = 0; i < size; i++) {
-                                                    vals[i] = sndv.nextValue();
+                                                    try {
+                                                        vals[i] = sndv.nextValue();
+                                                    } catch (Exception e) {
+                                                        logger.info("Exception while reading value from SNDV\nDoc Id : " + docId + ", DocValueCountSize : " + size + ", i : " + i);
+                                                        throw e;
+                                                    }
                                                 }
                                                 if (size > 1) {
                                                     docValues.put(fieldName, vals);
@@ -496,7 +512,12 @@ public class FetchPhase {
                                         int size = sndv.docValueCount();
                                         String[] vals = new String[size];
                                         for (int i = 0; i < size; i++) {
-                                            vals[i] = dateFormatter.formatMillis(sndv.nextValue());
+                                            try {
+                                                vals[i] = dateFormatter.formatMillis(sndv.nextValue());
+                                            } catch (Exception e) {
+                                                logger.info("Exception while reading value from SNDV\nDoc Id : " + docId + ", DocValueCountSize : " + size + ", i : " + i);
+                                                throw e;
+                                            }
                                         }
                                         if (size > 1) {
                                             docValues.put(fieldName, vals);
