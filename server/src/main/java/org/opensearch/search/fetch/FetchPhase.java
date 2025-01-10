@@ -375,7 +375,7 @@ public class FetchPhase {
             //if (fieldsVisitor.source() != null) {
             hitContext.sourceLookup().setSource(fieldsVisitor.source());
             try {
-                Map<String, Object> sourceAsMap = buildUsingDocValues(docId, subReaderContext.reader(), context.mapperService(), context.indexShard());
+                Map<String, Object> sourceAsMap = buildUsingDocValues(subDocId, subReaderContext.reader(), context.mapperService(), context.indexShard());
                 sourceAsMap = unflatten(sourceAsMap);
                 try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
                     builder.map(sourceAsMap);
