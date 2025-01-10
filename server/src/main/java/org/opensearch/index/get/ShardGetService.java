@@ -32,6 +32,8 @@
 
 package org.opensearch.index.get;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.IndexOptions;
@@ -87,6 +89,7 @@ import org.opensearch.index.mapper.Uid;
 import org.opensearch.index.shard.AbstractIndexShardComponent;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.search.DocValueFormat;
+import org.opensearch.search.fetch.FetchPhase;
 import org.opensearch.search.fetch.subphase.FetchSourceContext;
 
 import java.io.IOException;
@@ -500,7 +503,7 @@ public final class ShardGetService extends AbstractIndexShardComponent {
         return new CustomFieldsVisitor(Sets.newHashSet(fields), fetchSourceContext.fetchSource());
     }
 
-    private static Map<String, Object> buildUsingDocValues(int docId, LeafReader reader, MapperService mapperService, IndexShard indexShard) throws IOException {
+    private Map<String, Object> buildUsingDocValues(int docId, LeafReader reader, MapperService mapperService, IndexShard indexShard) throws IOException {
         Map<String, Object> docValues = new HashMap<>();
         for (Mapper mapper: mapperService.documentMapper().mappers()) {
             if (mapper instanceof MetadataFieldMapper) {
@@ -543,7 +546,12 @@ public final class ShardGetService extends AbstractIndexShardComponent {
                                                 int size = doubleValues.docValueCount();
                                                 double[] vals = new double[size];
                                                 for (int i = 0; i < size; i++) {
-                                                    vals[i] = doubleValues.nextValue();
+                                                    try {
+                                                        vals[i] = doubleValues.nextValue();
+                                                    } catch (Exception e) {
+                                                        logger.info("Exception while reading value from SNDV\nDoc Id : " + docId + ", DocValueCountSize : " + size + ", i : " + i);
+                                                        throw e;
+                                                    }
                                                 }
                                                 if (size > 1) {
                                                     docValues.put(fieldName, vals);
@@ -559,7 +567,12 @@ public final class ShardGetService extends AbstractIndexShardComponent {
                                                 int size = sndv.docValueCount();
                                                 long[] vals = new long[size];
                                                 for (int i = 0; i < size; i++) {
-                                                    vals[i] = sndv.nextValue();
+                                                    try {
+                                                        vals[i] = sndv.nextValue();
+                                                    } catch (Exception e) {
+                                                        logger.info("Exception while reading value from SNDV\nDoc Id : " + docId + ", DocValueCountSize : " + size + ", i : " + i);
+                                                        throw e;
+                                                    }
                                                 }
                                                 if (size > 1) {
                                                     docValues.put(fieldName, vals);
@@ -569,12 +582,18 @@ public final class ShardGetService extends AbstractIndexShardComponent {
                                             }
                                     }
                                 } else if (fieldMapper instanceof DateFieldMapper) {
+                                    logger.info("Get path -> Doc Id : " + docId + ", field : " + fieldName);
                                     DateFormatter dateFormatter = ((DateFieldMapper) fieldMapper).fieldType().dateTimeFormatter();
                                     if (sndv.advanceExact(docId)) {
                                         int size = sndv.docValueCount();
                                         String[] vals = new String[size];
                                         for (int i = 0; i < size; i++) {
-                                            vals[i] = dateFormatter.formatMillis(sndv.nextValue());
+                                            try {
+                                                vals[i] = dateFormatter.formatMillis(sndv.nextValue());
+                                            } catch (Exception e) {
+                                                logger.info("Exception while reading value from SNDV\nDoc Id : " + docId + ", DocValueCountSize : " + size + ", i : " + i);
+                                                throw e;
+                                            }
                                         }
                                         if (size > 1) {
                                             docValues.put(fieldName, vals);

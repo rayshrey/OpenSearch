@@ -176,6 +176,7 @@ public class FetchPhase {
                     if (currentReaderContext.reader() instanceof SequentialStoredFieldsLeafReader
                         && hasSequentialDocs
                         && docs.length >= 10) {
+                        logger.info("Reader checkpoint - SequentialStoredFieldsLeafReader");
                         // All the docs to fetch are adjacent but Lucene stored fields are optimized
                         // for random access and don't optimize for sequential access - except for merging.
                         // So we do a little hack here and pretend we're going to do merges in order to
@@ -183,6 +184,7 @@ public class FetchPhase {
                         SequentialStoredFieldsLeafReader lf = (SequentialStoredFieldsLeafReader) currentReaderContext.reader();
                         fieldReader = lf.getSequentialStoredFieldsReader()::document;
                     } else {
+                        logger.info("Reader checkpoint - Normal path - Not SequentialStoredFieldsLeafReader");
                         fieldReader = currentReaderContext.reader().storedFields()::document;
                     }
                     for (FetchSubPhaseProcessor processor : processors) {
@@ -507,6 +509,7 @@ public class FetchPhase {
                                             }
                                     }
                                 } else if (fieldMapper instanceof DateFieldMapper) {
+                                    logger.info("Search path -> Doc Id : " + docId + ", field : " + fieldName);
                                     DateFormatter dateFormatter = ((DateFieldMapper) fieldMapper).fieldType().dateTimeFormatter();
                                     if (sndv.advanceExact(docId)) {
                                         int size = sndv.docValueCount();
