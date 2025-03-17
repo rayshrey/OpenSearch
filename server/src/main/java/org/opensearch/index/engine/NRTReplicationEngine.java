@@ -407,7 +407,7 @@ public class NRTReplicationEngine extends Engine implements LifecycleAware {
         ensureOpen();
         // Skip flushing for indices with partial locality (warm indices)
         // For these indices, we don't need to commit as we will sync from the remote store on re-open
-        if (engineConfig.getIndexSettings().isStoreLocalityPartial()) {
+        if (engineConfig.getIndexSettings().isWarmIndex()) {
             return;
         }
         // readLock is held here to wait/block any concurrent close that acquires the writeLock.
@@ -499,7 +499,7 @@ public class NRTReplicationEngine extends Engine implements LifecycleAware {
                     latestSegmentInfos.changed();
                 }
                 try {
-                    if (engineConfig.getIndexSettings().isStoreLocalityPartial() == false) {
+                    if (engineConfig.getIndexSettings().isWarmIndex() == false) {
                         commitSegmentInfos(latestSegmentInfos);
                     }
                 } catch (IOException e) {

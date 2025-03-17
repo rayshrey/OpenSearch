@@ -51,10 +51,10 @@ public class FeatureFlags {
     public static final String DATETIME_FORMATTER_CACHING = "opensearch.experimental.optimization.datetime_formatter_caching.enabled";
 
     /**
-     * Gates the functionality of remote index having the capability to move across different tiers
+     * Gates the functionality of warm index having the capability to store data remotely.
      * Once the feature is ready for release, this feature flag can be removed.
      */
-    public static final String TIERED_REMOTE_INDEX = "opensearch.experimental.feature.tiered_remote_index.enabled";
+    public static final String WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG = "opensearch.experimental.feature.writable_warm_index.enabled";
 
     /**
      * Gates the functionality of pluggable cache.
@@ -85,7 +85,11 @@ public class FeatureFlags {
         Property.NodeScope
     );
 
-    public static final Setting<Boolean> TIERED_REMOTE_INDEX_SETTING = Setting.boolSetting(TIERED_REMOTE_INDEX, false, Property.NodeScope);
+    public static final Setting<Boolean> WRITABLE_WARM_INDEX_SETTING = Setting.boolSetting(
+        WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG,
+        false,
+        Property.NodeScope
+    );
 
     public static final Setting<Boolean> PLUGGABLE_CACHE_SETTING = Setting.boolSetting(PLUGGABLE_CACHE, false, Property.NodeScope);
 
@@ -133,8 +137,9 @@ public class FeatureFlags {
         EXTENSIONS_SETTING,
         TELEMETRY_SETTING,
         DATETIME_FORMATTER_CACHING_SETTING,
-        TIERED_REMOTE_INDEX_SETTING,
         PLUGGABLE_CACHE_SETTING,
+        WRITABLE_WARM_INDEX_SETTING,
+        STAR_TREE_INDEX_SETTING,
         APPLICATION_BASED_CONFIGURATION_TEMPLATES_SETTING,
         STAR_TREE_INDEX_SETTING,
         READER_WRITER_SPLIT_EXPERIMENTAL_SETTING,
