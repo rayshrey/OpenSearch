@@ -307,7 +307,7 @@ class LRUCache<K, V> implements RefCountedCache<K, V> {
     }
 
     // To be used only for debugging purposes
-    public void logCurrentState() {
+    public StringBuilder logCurrentState() {
         lock.lock();
         try {
             final StringBuilder allFiles = new StringBuilder("\n");
@@ -324,6 +324,7 @@ class LRUCache<K, V> implements RefCountedCache<K, V> {
             if (allFiles.length() > 1) {
                 logger.trace(() -> "Cache entries : " + allFiles);
             }
+            return allFiles;
         } finally {
             lock.unlock();
         }
