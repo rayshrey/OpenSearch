@@ -25,15 +25,15 @@ public class CachedSwitchableIndexInput implements CachedIndexInput {
 
     public CachedSwitchableIndexInput(
         FileCache fileCache,
-        Path path,
-        IndexInput indexInput,
-        String name,
-        RemoteSegmentStoreDirectory remoteDirectory,
+        String fileName,
+        Path fullFilePath,
+        Path switchableFilePath,
         FSDirectory localDirectory,
+        RemoteSegmentStoreDirectory remoteDirectory,
         TransferManager transferManager
         ) throws IOException {
         isClosed = new AtomicBoolean(false);
-        switchableIndexInput = new SwitchableIndexInput(fileCache, path, indexInput, name,remoteDirectory, localDirectory, transferManager);
+        switchableIndexInput = new SwitchableIndexInput(fileCache, fileName, fullFilePath, switchableFilePath, localDirectory, remoteDirectory, transferManager);
     }
 
     @Override

@@ -145,7 +145,7 @@ public class CompositeDirectory extends FilterDirectory {
         logger.trace("Composite Directory[{}]: deleteFile() called {}", this::toString, () -> name);
         if (FileTypeUtils.isTempFile(name)) {
             localDirectory.deleteFile(name);
-        } else if (Arrays.asList(listAll()).contains(name) == false) {
+        } else if (fileCache.get(getFilePathSwitchable(name)) == null) {
             throw new NoSuchFileException("File " + name + " not found in directory");
         } else {
             List<String> blockFiles = listBlockFiles(name);
@@ -178,8 +178,9 @@ public class CompositeDirectory extends FilterDirectory {
         ensureOpen();
         logger.trace("Composite Directory[{}]: fileLength() called {}", this::toString, () -> name);
         long fileLength;
-        Path key = getFilePathSwitchable(name);
-        if (FileTypeUtils.isTempFile(name) || fileCache.get(key) != null) {
+        Path fullFileKey = getFilePath(name);
+        Path switchableFileKey = getFilePathSwitchable(name);
+        if (FileTypeUtils.isTempFile(name) || fileCache.get(fullFileKey) != null) {
             try {
                 fileLength = localDirectory.fileLength(name);
                 logger.trace(
@@ -189,16 +190,22 @@ public class CompositeDirectory extends FilterDirectory {
                     () -> fileLength
                 );
             } finally {
-                fileCache.decRef(key);
+                fileCache.decRef(fullFileKey);
             }
+        } else if (fileCache.get(switchableFileKey) == null) {
+            throw new NoSuchFileException("File " + name + " not found in directory");
         } else {
-            fileLength = remoteDirectory.fileLength(name);
-            logger.trace(
-                "Composite Directory[{}]: fileLength of {} fetched from Remote - {}",
-                this::toString,
-                () -> name,
-                () -> fileLength
-            );
+            try {
+                fileLength = remoteDirectory.fileLength(name);
+                logger.trace(
+                    "Composite Directory[{}]: fileLength of {} fetched from Remote - {}",
+                    this::toString,
+                    () -> name,
+                    () -> fileLength
+                );
+            } finally {
+                fileCache.decRef(switchableFileKey);
+            }
         }
         return fileLength;
     }
@@ -262,44 +269,18 @@ public class CompositeDirectory extends FilterDirectory {
         if (FileTypeUtils.isTempFile(name)) {
             return localDirectory.openInput(name, context);
         }
-        // Return directly from the FileCache (via TransferManager) if complete file is present
+
         Path key = getFilePathSwitchable(name);
         CachedIndexInput indexInput = fileCache.get(key);
         if (indexInput != null) {
-            return indexInput.getIndexInput().clone();
-        } else {
-            throw new NoSuchFileException("File " + name + " not found in directory");
-        }
-        /*
-        if (indexInput != null) {
-            logger.trace("Composite Directory[{}]: Complete file {} found in FileCache", this::toString, () -> name);
             try {
                 return indexInput.getIndexInput().clone();
             } finally {
                 fileCache.decRef(key);
             }
+        } else {
+            throw new NoSuchFileException("File " + name + " not found in directory");
         }
-        // If file has been uploaded to the Remote Store, fetch it from the Remote Store in blocks via OnDemandCompositeBlockIndexInput
-        else {
-            logger.trace(
-                "Composite Directory[{}]: Complete file {} not in FileCache, to be fetched in Blocks from Remote",
-                this::toString,
-                () -> name
-            );
-            RemoteSegmentStoreDirectory.UploadedSegmentMetadata uploadedSegmentMetadata = remoteDirectory.getSegmentsUploadedToRemoteStore()
-                .get(name);
-            if (uploadedSegmentMetadata == null) {
-                throw new NoSuchFileException("File " + name + " not found in directory");
-            }
-            // TODO : Refactor FileInfo and OnDemandBlockSnapshotIndexInput to more generic names as they are not Remote Snapshot specific
-            BlobStoreIndexShardSnapshot.FileInfo fileInfo = new BlobStoreIndexShardSnapshot.FileInfo(
-                name,
-                new StoreFileMetadata(name, uploadedSegmentMetadata.getLength(), uploadedSegmentMetadata.getChecksum(), Version.LATEST),
-                null
-            );
-            return new OnDemandBlockSnapshotIndexInput(fileInfo, localDirectory, transferManager);
-        }
-         */
     }
 
     /**
@@ -341,15 +322,13 @@ public class CompositeDirectory extends FilterDirectory {
         Uncomment the below commented line(to remove the file from cache once uploaded) to test block based functionality
          */
         logger.info(
-            "Composite Directory[{}]: File {} uploaded to Remote Store and now can be eligible for eviction in FileCache",
+            "Composite Directory[{}]: File {} uploaded to Remote Store and now can be eligible for switching to blocks",
             this::toString,
             () -> file
         );
         Path filePath = getFilePathSwitchable(file);
-        fileCache.decRef(filePath);
         ((SwitchableIndexInput)fileCache.get(filePath).getIndexInput()).switchToRemote();
         fileCache.decRef(filePath);
-        // fileCache.remove(getFilePath(fileName));
     }
 
     // Visibility public since we need it in IT tests
@@ -358,7 +337,7 @@ public class CompositeDirectory extends FilterDirectory {
     }
 
     public Path getFilePathSwitchable(String name) {
-        return localDirectory.getDirectory().resolve(name+switch_prefix);
+        return localDirectory.getDirectory().resolve(name + switch_prefix);
     }
 
     /**
@@ -402,16 +381,16 @@ public class CompositeDirectory extends FilterDirectory {
         return remoteFiles;
     }
 
-    private void cacheFile(String name) throws IOException {
-        Path filePath = getFilePath(name);
-        String switchableName = name + switch_prefix;
+    private void cacheFile(String fileName) throws IOException {
+        Path fullFilePath = getFilePath(fileName);
+        String switchableName = fileName + switch_prefix;
         Path switchableFilePath = getFilePath(switchableName);
         // put will increase the refCount for the path, making sure it is not evicted, will decrease the ref after it is uploaded to Remote
         // so that it can be evicted after that
         // this is just a temporary solution, will pin the file once support for that is added in FileCache
         // TODO : Pin the above filePath in the file cache once pinning support is added so that it cannot be evicted unless it has been
         // successfully uploaded to Remote
-        fileCache.put(switchableFilePath, new CachedSwitchableIndexInput(fileCache, filePath, localDirectory.openInput(name, IOContext.DEFAULT), name, remoteDirectory, localDirectory, transferManager));
+        fileCache.put(switchableFilePath, new CachedSwitchableIndexInput(fileCache, fileName, fullFilePath, switchableFilePath, localDirectory, remoteDirectory, transferManager));
     }
 
 }
