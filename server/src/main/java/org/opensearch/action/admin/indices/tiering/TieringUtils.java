@@ -41,6 +41,8 @@ public class TieringUtils {
      * @return true if the index is a warm index, false otherwise
      */
     public static boolean isWarmIndex(final IndexMetadata indexMetadata) {
-        return indexMetadata.getSettings().getAsBoolean(IndexModule.IS_WARM_INDEX_SETTING.getKey(), false);
+        return indexMetadata.getSettings().getAsBoolean(IndexModule.IS_WARM_INDEX_SETTING.getKey(), false)
+            && IndexModule.DataLocalityType.PARTIAL.name()
+                .equals(indexMetadata.getSettings().get(IndexModule.INDEX_STORE_LOCALITY_SETTING.getKey()));
     }
 }

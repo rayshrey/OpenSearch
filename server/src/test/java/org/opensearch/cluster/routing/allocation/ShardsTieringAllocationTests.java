@@ -81,8 +81,10 @@ public class ShardsTieringAllocationTests extends TieringAllocationBaseTestCase 
         clusterState = updateIndexMetadataForTiering(
             clusterState,
             localIndices,
+            remoteIndices,
             IndexModule.TieringState.HOT_TO_WARM.name(),
-            IndexModule.DataLocalityType.PARTIAL.name()
+            IndexModule.DataLocalityType.PARTIAL.name(),
+            true
         );
         // trigger shard relocation
         clusterState = allocateShardsAndBalance(clusterState, service);
@@ -96,6 +98,55 @@ public class ShardsTieringAllocationTests extends TieringAllocationBaseTestCase 
             RoutingPool nodePool = RoutingPool.getNodePool(node);
             RoutingPool shardPool = RoutingPool.getShardPool(shard, allocation);
             assertEquals(RoutingPool.REMOTE_CAPABLE, shardPool);
+            assertEquals(nodePool, shardPool);
+        }
+    }
+
+    @LockFeatureFlag(WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG)
+    public void testShardsWithWarmToHotTiering() throws Exception {
+        int localOnlyNodes = 60;
+        int remoteCapableNodes = 13;
+        int localIndices = 0;
+        int remoteIndices = 10; // 5 primary, 1 replica
+        ClusterState clusterState = createInitialCluster(localOnlyNodes, remoteCapableNodes, localIndices, remoteIndices, true);
+        AllocationService service = this.createRemoteCapableAllocationService();
+
+        // assign shards to respective nodes
+        clusterState = allocateShardsAndBalance(clusterState, service);
+        RoutingNodes routingNodes = clusterState.getRoutingNodes();
+        RoutingAllocation allocation = getRoutingAllocation(clusterState, routingNodes);
+        assertEquals(0, routingNodes.unassigned().size());
+
+        for (ShardRouting shard : clusterState.getRoutingTable().allShards()) {
+            assertTrue(shard.relocating() || shard.started());
+            RoutingPool shardPool = RoutingPool.getShardPool(shard, allocation);
+            RoutingNode node = routingNodes.node(shard.currentNodeId());
+            RoutingPool nodePool = RoutingPool.getNodePool(node);
+            assertEquals(REMOTE_CAPABLE, shardPool);
+            assertEquals(REMOTE_CAPABLE, nodePool);
+        }
+
+        // put indices in the hot to warm tiering state
+        clusterState = updateIndexMetadataForTiering(
+            clusterState,
+            localIndices,
+            remoteIndices,
+            IndexModule.TieringState.WARM_TO_HOT.name(),
+            IndexModule.DataLocalityType.FULL.name(),
+            false
+        );
+        // trigger shard relocation
+        clusterState = allocateShardsAndBalance(clusterState, service);
+        routingNodes = clusterState.getRoutingNodes();
+        allocation = getRoutingAllocation(clusterState, routingNodes);
+        assertEquals(0, routingNodes.unassigned().size());
+
+        for (ShardRouting shard : clusterState.getRoutingTable().allShards()) {
+            assertBusy(() -> { assertFalse(shard.unassigned()); });
+            RoutingNode node = routingNodes.node(shard.currentNodeId());
+            RoutingPool nodePool = RoutingPool.getNodePool(node);
+            RoutingPool shardPool = RoutingPool.getShardPool(shard, allocation);
+            assertEquals(LOCAL_ONLY, shardPool);
             assertEquals(nodePool, shardPool);
         }
     }

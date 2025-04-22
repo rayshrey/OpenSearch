@@ -91,12 +91,13 @@ public class TargetPoolAllocationDecider extends AllocationDecider {
     public Decision canRemain(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
         RoutingPool targetPool = RoutingPool.getShardPool(shardRouting, allocation);
         RoutingPool currentNodePool = RoutingPool.getNodePool(allocation.routingNodes().node(shardRouting.currentNodeId()));
-        if (RoutingPool.REMOTE_CAPABLE.equals(targetPool) && targetPool != currentNodePool) {
+
+        if (targetPool != currentNodePool) {
             logger.debug(
                 "Shard: [{}] has current pool: [{}], target pool: [{}]. Cannot remain on node: [{}]",
                 shardRouting.shortSummary(),
                 currentNodePool.name(),
-                RoutingPool.REMOTE_CAPABLE.name(),
+                targetPool.name(),
                 node.node()
             );
             return allocation.decision(

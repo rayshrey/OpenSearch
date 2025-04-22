@@ -24,8 +24,10 @@ public abstract class TieringAllocationBaseTestCase extends RemoteShardsBalancer
     public ClusterState updateIndexMetadataForTiering(
         ClusterState clusterState,
         int localIndices,
+        int remoteIndices,
         String tieringState,
-        String dataLocality
+        String dataLocality,
+        boolean isWarmIndex
     ) {
         Metadata.Builder mb = Metadata.builder(clusterState.metadata());
         for (int i = 0; i < localIndices; i++) {
@@ -38,7 +40,22 @@ public abstract class TieringAllocationBaseTestCase extends RemoteShardsBalancer
                             .put(settings)
                             .put(settings)
                             .put(INDEX_TIERING_STATE.getKey(), tieringState)
-                            .put(IndexModule.IS_WARM_INDEX_SETTING.getKey(), true)
+                            .put(IndexModule.IS_WARM_INDEX_SETTING.getKey(), isWarmIndex)
+                            .put(INDEX_STORE_LOCALITY_SETTING.getKey(), dataLocality)
+                    )
+            );
+        }
+        for (int i = 0; i < remoteIndices; i++) {
+            IndexMetadata indexMetadata = clusterState.metadata().index(getIndexName(i, true));
+            Settings settings = indexMetadata.getSettings();
+            mb.put(
+                IndexMetadata.builder(indexMetadata)
+                    .settings(
+                        Settings.builder()
+                            .put(settings)
+                            .put(settings)
+                            .put(INDEX_TIERING_STATE.getKey(), tieringState)
+                            .put(IndexModule.IS_WARM_INDEX_SETTING.getKey(), isWarmIndex)
                             .put(INDEX_STORE_LOCALITY_SETTING.getKey(), dataLocality)
                     )
             );
