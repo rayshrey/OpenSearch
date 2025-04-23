@@ -241,16 +241,19 @@ public class SegmentedCache<K, V> implements RefCountedCache<K, V> {
     }
 
     // To be used only for debugging purposes
-    public void logCurrentState() {
+    public StringBuilder logCurrentState() {
+        StringBuilder stringBuilder = new StringBuilder();
         int i = 0;
         for (RefCountedCache<K, V> cache : table) {
             if (cache.size() > 0) {
                 final int segmentIndex = i;
                 logger.trace(() -> "SegmentedCache " + segmentIndex);
-                ((LRUCache<K, V>) cache).logCurrentState();
+                //((LRUCache<K, V>) cache).logCurrentState();
+                stringBuilder.append(((LRUCache<K, V>) cache).logCurrentState());
             }
             i++;
         }
+        return stringBuilder;
     }
 
     enum SingletonWeigher implements Weigher<Object> {

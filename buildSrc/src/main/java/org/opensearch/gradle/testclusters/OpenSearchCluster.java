@@ -402,8 +402,8 @@ public class OpenSearchCluster implements TestClusterConfiguration, Named {
                     node.defaultConfig.put("cluster.initial_master_nodes", "[" + nodeNames + "]");
                 }
             }
-            node.defaultConfig.put("discovery.seed_providers", "file");
-            node.defaultConfig.put("discovery.seed_hosts", "[]");
+            //node.defaultConfig.put("discovery.seed_providers", "file");
+            //node.defaultConfig.put("discovery.seed_hosts", "[]");
         } else {
             node.defaultConfig.put("discovery.zen.master_election.wait_for_joins_timeout", "5s");
             if (nodes.size() > 1) {

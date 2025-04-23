@@ -34,7 +34,7 @@ public class RestWarmTieringAction extends BaseRestHandler {
 
     @Override
     public List<RestHandler.Route> routes() {
-        return singletonList(new RestHandler.Route(POST, "/{index}/_tier/" + TARGET_TIER));
+        return singletonList(new RestHandler.Route(POST, "/{index}/_tier1/" + TARGET_TIER));
     }
 
     @Override

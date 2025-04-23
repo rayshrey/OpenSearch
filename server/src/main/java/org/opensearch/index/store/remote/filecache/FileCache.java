@@ -147,11 +147,13 @@ public class FileCache implements RefCountedCache<Path, CachedIndexInput> {
     }
 
     // To be used only for debugging purposes
-    public void logCurrentState() {
-        logger.trace("CURRENT STATE OF FILE CACHE \n");
+    public StringBuilder logCurrentState() {
+        StringBuilder stringBuilder = new StringBuilder();
+        stringBuilder.append("\nCURRENT STATE OF FILE CACHE \n");
         long cacheUsage = theCache.usage();
-        logger.trace("Total Usage: " + cacheUsage);
-        theCache.logCurrentState();
+        long activeUsage = theCache.activeUsage();
+        stringBuilder.append("Total Usage: ").append(cacheUsage).append(" , Active Usage: ").append(activeUsage);
+        return stringBuilder.append(theCache.logCurrentState());
     }
 
     /**
@@ -210,8 +212,11 @@ public class FileCache implements RefCountedCache<Path, CachedIndexInput> {
      * Returns the current {@link FileCacheStats}
      */
     public FileCacheStats fileCacheStats() {
+        StringBuilder stringBuilder = logCurrentState();
+        logger.info(stringBuilder);
         final CacheStats stats = stats();
         final CacheStats.FullFileStats fullFileStats = stats.fullFileStats();
+        logger.info("Full file stats - Active: {}, Total: {}", fullFileStats.getActiveUsage(), fullFileStats.getUsage());
 
         return new FileCacheStats(
             System.currentTimeMillis(),
