@@ -23,7 +23,8 @@ import org.junit.Before;
 import static org.opensearch.cluster.routing.RoutingPool.LOCAL_ONLY;
 import static org.opensearch.cluster.routing.RoutingPool.REMOTE_CAPABLE;
 import static org.opensearch.cluster.routing.RoutingPool.getIndexPool;
-import static org.opensearch.index.IndexModule.INDEX_STORE_LOCALITY_SETTING;
+import static org.opensearch.common.util.FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG;
+import static org.opensearch.index.IndexModule.IS_WARM_INDEX_SETTING;
 
 public class ShardsTieringAllocationTests extends TieringAllocationBaseTestCase {
 
@@ -85,8 +86,9 @@ public class ShardsTieringAllocationTests extends TieringAllocationBaseTestCase 
         clusterState = updateIndexMetadataForTiering(
             clusterState,
             localIndices,
+            remoteIndices,
             IndexModule.TieringState.HOT_TO_WARM.name(),
-            IndexModule.DataLocalityType.PARTIAL.name()
+            true
         );
         // trigger shard relocation
         clusterState = allocateShardsAndBalance(clusterState, service);
@@ -103,14 +105,10 @@ public class ShardsTieringAllocationTests extends TieringAllocationBaseTestCase 
             assertEquals(nodePool, shardPool);
         }
     }
-
     public void testShardPoolForPartialIndices() {
         String index = "test-index";
         IndexMetadata indexMetadata = IndexMetadata.builder(index)
-            .settings(
-                settings(Version.CURRENT).put(INDEX_STORE_LOCALITY_SETTING.getKey(), IndexModule.DataLocalityType.PARTIAL.name())
-                    .put(IndexModule.IS_WARM_INDEX_SETTING.getKey(), true)
-            )
+            .settings(settings(Version.CURRENT).put(IndexModule.IS_WARM_INDEX_SETTING.getKey(), true))
             .numberOfShards(PRIMARIES)
             .numberOfReplicas(REPLICAS)
             .build();
@@ -121,7 +119,7 @@ public class ShardsTieringAllocationTests extends TieringAllocationBaseTestCase 
     public void testShardPoolForFullIndices() {
         String index = "test-index";
         IndexMetadata indexMetadata = IndexMetadata.builder(index)
-            .settings(settings(Version.CURRENT).put(INDEX_STORE_LOCALITY_SETTING.getKey(), IndexModule.DataLocalityType.FULL.name()))
+            .settings(settings(Version.CURRENT).put(IS_WARM_INDEX_SETTING.getKey(), false))
             .numberOfShards(PRIMARIES)
             .numberOfReplicas(REPLICAS)
             .build();
