@@ -344,6 +344,7 @@ public class IndicesService extends AbstractLifecycleComponent
     private final MetaStateService metaStateService;
     private final Collection<Function<IndexSettings, Optional<EngineFactory>>> engineFactoryProviders;
     private final Map<String, IndexStorePlugin.DirectoryFactory> directoryFactories;
+    private final Map<String, IndexStorePlugin.CompositeDirectoryFactory> compositeDirectoryFactories;
     private final Map<String, IndexStorePlugin.RecoveryStateFactory> recoveryStateFactories;
     final AbstractRefCounted indicesRefCount; // pkg-private for testing
     private final CountDownLatch closeLatch = new CountDownLatch(1);
@@ -390,6 +391,7 @@ public class IndicesService extends AbstractLifecycleComponent
         MetaStateService metaStateService,
         Collection<Function<IndexSettings, Optional<EngineFactory>>> engineFactoryProviders,
         Map<String, IndexStorePlugin.DirectoryFactory> directoryFactories,
+        Map<String, IndexStorePlugin.CompositeDirectoryFactory> compositeDirectoryFactories,
         ValuesSourceRegistry valuesSourceRegistry,
         Map<String, IndexStorePlugin.RecoveryStateFactory> recoveryStateFactories,
         IndexStorePlugin.DirectoryFactory remoteDirectoryFactory,
@@ -452,6 +454,7 @@ public class IndicesService extends AbstractLifecycleComponent
         this.engineFactoryProviders = engineFactoryProviders;
 
         this.directoryFactories = directoryFactories;
+        this.compositeDirectoryFactories = compositeDirectoryFactories;
         this.recoveryStateFactories = recoveryStateFactories;
         // doClose() is called when shutting down a node, yet there might still be ongoing requests
         // that we need to wait for before closing some resources such as the caches. In order to
@@ -628,6 +631,7 @@ public class IndicesService extends AbstractLifecycleComponent
             metaStateService,
             engineFactoryProviders,
             directoryFactories,
+            Collections.emptyMap(),
             valuesSourceRegistry,
             recoveryStateFactories,
             remoteDirectoryFactory,
@@ -1022,6 +1026,7 @@ public class IndicesService extends AbstractLifecycleComponent
             getEngineFactory(idxSettings),
             getEngineConfigFactory(idxSettings),
             directoryFactories,
+            compositeDirectoryFactories,
             () -> allowExpensiveQueries,
             indexNameExpressionResolver,
             recoveryStateFactories,
@@ -1115,6 +1120,7 @@ public class IndicesService extends AbstractLifecycleComponent
             getEngineFactory(idxSettings),
             getEngineConfigFactory(idxSettings),
             directoryFactories,
+            compositeDirectoryFactories,
             () -> allowExpensiveQueries,
             indexNameExpressionResolver,
             recoveryStateFactories,
