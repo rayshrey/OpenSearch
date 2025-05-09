@@ -391,6 +391,7 @@ public final class IndexModule {
             engineFactory,
             engineConfigFactory,
             directoryFactories,
+            Collections.emptyMap(),
             allowExpensiveQueries,
             expressionResolver,
             recoveryStateFactories,

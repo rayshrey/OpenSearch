@@ -379,6 +379,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             client,
             queryCache,
             directoryFactory,
+            null,
             remoteDirectoryFactory,
             eventListener,
             wrapperFactory,

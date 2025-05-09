@@ -568,6 +568,7 @@ public class IndicesService extends AbstractLifecycleComponent
             metaStateService,
             engineFactoryProviders,
             directoryFactories,
+            Collections.emptyMap(),
             valuesSourceRegistry,
             recoveryStateFactories,
             remoteDirectoryFactory,
