@@ -155,13 +155,14 @@ public class CompositeDirectory extends FilterDirectory {
             if (blockFiles.isEmpty()) {
                 // Remove this condition when this issue is addressed.
                 // TODO: https://github.com/opensearch-project/OpenSearch/issues/17526
-                logger.debug("The file [{}] or its block files do not exist in local directory", name);
+                logger.trace("The file [{}] or its block files do not exist in local directory", name);
             } else {
                 for (String blockFile : blockFiles) {
                     if (fileCache.get(getFilePath(blockFile)) == null) {
-                        logger.debug("The file [{}] exists in local but not part of FileCache, deleting it from local", blockFile);
+                        logger.trace("Deleting file from local (does not exist in FileCache and delete for full file is called) - {}", blockFile);
                         localDirectory.deleteFile(blockFile);
                     } else {
+                        logger.trace("Removing file from FileCache (delete for full file is called) - {}", blockFile);
                         fileCache.remove(getFilePath(blockFile));
                     }
                 }

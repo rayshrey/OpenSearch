@@ -142,6 +142,13 @@ public class TransferManager {
                 }
             }
             final IndexInput luceneIndexInput = request.getDirectory().openInput(request.getFileName(), IOContext.READ);
+            long indexInputLength = luceneIndexInput.length();
+            long blobFetchRequestLength = request.getBlobLength();
+            if (indexInputLength != blobFetchRequestLength) {
+                logger.error("ERROR IN TRANSFER MANAGER !!!!");
+                logger.error("Block length in actual differs from request length for file {}, real length - {}, request length - {}", request.getFilePath().toString(), indexInputLength, blobFetchRequestLength);
+                logger.error(request);
+            }
             return new FileCachedIndexInput(fileCache, request.getFilePath(), luceneIndexInput);
         } catch (IOException e) {
             throw new UncheckedIOException(e);

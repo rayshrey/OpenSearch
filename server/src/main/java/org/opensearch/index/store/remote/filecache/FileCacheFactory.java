@@ -8,6 +8,8 @@
 
 package org.opensearch.index.store.remote.filecache;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.common.cache.RemovalReason;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.index.store.remote.utils.cache.SegmentedCache;
@@ -36,6 +38,7 @@ import static org.opensearch.ExceptionsHelper.catchAsRuntimeException;
  * @opensearch.internal
  */
 public class FileCacheFactory {
+    private static final Logger logger = LogManager.getLogger(FileCacheFactory.class);
 
     public static FileCache createConcurrentLRUFileCache(long capacity, CircuitBreaker circuitBreaker) {
         return new FileCache(createDefaultBuilder().capacity(capacity).build(), circuitBreaker);
@@ -55,7 +58,10 @@ public class FileCacheFactory {
                 Path key = removalNotification.getKey();
                 if (removalReason != RemovalReason.REPLACED) {
                     catchAsRuntimeException(value::close);
-                    catchAsRuntimeException(() -> Files.deleteIfExists(key));
+                    catchAsRuntimeException(() -> {
+                        logger.trace("Deleting file from file cache {}, reason of removal {}", key, removalReason.toString());
+                        Files.deleteIfExists(key);
+                    });
                 }
             });
     }

@@ -107,6 +107,17 @@ public class BlobFetchRequest {
         public long getLength() {
             return length;
         }
+
+        @Override
+        public String toString() {
+            return "BlobPart ("
+                + blobName
+                + ") , Position ("
+                + position
+                + ") , Length ("
+                + length
+                +")";
+        }
     }
 
     /**

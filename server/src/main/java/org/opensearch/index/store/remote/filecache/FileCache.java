@@ -151,11 +151,14 @@ public class FileCache implements RefCountedCache<Path, CachedIndexInput> {
     }
 
     // To be used only for debugging purposes
-    public void logCurrentState() {
-        logger.trace("CURRENT STATE OF FILE CACHE \n");
+    public StringBuilder logCurrentState() {
+        StringBuilder stringBuilder =  new StringBuilder("");
+        stringBuilder.append("CURRENT STATE OF FILE CACHE \n");
         CacheUsage cacheUsage = theCache.usage();
-        logger.trace("Total Usage: " + cacheUsage.usage() + " , Active Usage: " + cacheUsage.activeUsage());
+        stringBuilder.append("Total Usage: ").append(cacheUsage.usage()).append(" , Active Usage: ").append(cacheUsage.activeUsage());
+        logger.trace(stringBuilder);
         theCache.logCurrentState();
+        return stringBuilder;
     }
 
     /**

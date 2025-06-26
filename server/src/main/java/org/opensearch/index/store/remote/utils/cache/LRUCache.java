@@ -322,23 +322,21 @@ class LRUCache<K, V> implements RefCountedCache<K, V> {
     }
 
     // To be used only for debugging purposes
-    public void logCurrentState() {
+    public StringBuilder logCurrentState() {
         lock.lock();
         try {
             final StringBuilder allFiles = new StringBuilder("\n");
             for (Map.Entry<K, Node<K, V>> entry : data.entrySet()) {
                 String path = entry.getKey().toString();
                 String file = path.substring(path.lastIndexOf('/'));
-                allFiles.append(file)
+                allFiles.append(path)
                     .append(" [RefCount: ")
                     .append(entry.getValue().refCount)
                     .append(" , Weight: ")
                     .append(entry.getValue().weight)
                     .append(" ]\n");
             }
-            if (allFiles.length() > 1) {
-                logger.trace(() -> "Cache entries : " + allFiles);
-            }
+            return allFiles;
         } finally {
             lock.unlock();
         }
