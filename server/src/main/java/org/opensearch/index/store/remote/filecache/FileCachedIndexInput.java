@@ -8,8 +8,11 @@
 
 package org.opensearch.index.store.remote.filecache;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
+import org.opensearch.index.store.remote.utils.TransferManager.StreamReader;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -24,6 +27,7 @@ import java.nio.file.Path;
  * @opensearch.internal
  */
 public class FileCachedIndexInput extends IndexInput implements RandomAccessInput {
+    private static final Logger logger = LogManager.getLogger(FileCachedIndexInput.class);
 
     protected final FileCache cache;
 
@@ -42,6 +46,7 @@ public class FileCachedIndexInput extends IndexInput implements RandomAccessInpu
     protected final boolean isClone;
 
     protected volatile boolean closed = false;
+    private Exception error = null;
 
     public FileCachedIndexInput(FileCache cache, Path filePath, IndexInput underlyingIndexInput) {
         this(cache, filePath, underlyingIndexInput, false);
@@ -62,7 +67,12 @@ public class FileCachedIndexInput extends IndexInput implements RandomAccessInpu
 
     @Override
     public void seek(long pos) throws IOException {
-        luceneIndexInput.seek(pos);
+        try {
+            luceneIndexInput.seek(pos);
+        } catch (IOException e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
@@ -72,57 +82,112 @@ public class FileCachedIndexInput extends IndexInput implements RandomAccessInpu
 
     @Override
     public byte readByte() throws IOException {
-        return luceneIndexInput.readByte();
+        try {
+            return luceneIndexInput.readByte();
+        } catch (Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public short readShort() throws IOException {
-        return luceneIndexInput.readShort();
+        try {
+            return luceneIndexInput.readShort();
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public int readInt() throws IOException {
-        return luceneIndexInput.readInt();
+        try {
+            return luceneIndexInput.readInt();
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public long readLong() throws IOException {
-        return luceneIndexInput.readLong();
+        try{
+            return luceneIndexInput.readLong();
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public final int readVInt() throws IOException {
-        return luceneIndexInput.readVInt();
+        try {
+            return luceneIndexInput.readVInt();
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public final long readVLong() throws IOException {
-        return luceneIndexInput.readVLong();
+        try {
+            return luceneIndexInput.readVLong();
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public void readBytes(byte[] b, int offset, int len) throws IOException {
-        luceneIndexInput.readBytes(b, offset, len);
+        try {
+            luceneIndexInput.readBytes(b, offset, len);
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public byte readByte(long pos) throws IOException {
-        return ((RandomAccessInput) luceneIndexInput).readByte(pos);
+        try {
+            return ((RandomAccessInput) luceneIndexInput).readByte(pos);
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public short readShort(long pos) throws IOException {
-        return ((RandomAccessInput) luceneIndexInput).readShort(pos);
+        try {
+            return ((RandomAccessInput) luceneIndexInput).readShort(pos);
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public int readInt(long pos) throws IOException {
-        return ((RandomAccessInput) luceneIndexInput).readInt(pos);
+        try {
+            return ((RandomAccessInput) luceneIndexInput).readInt(pos);
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
     public long readLong(long pos) throws IOException {
-        return ((RandomAccessInput) luceneIndexInput).readLong(pos);
+        try {
+            return ((RandomAccessInput) luceneIndexInput).readLong(pos);
+        } catch(Exception e) {
+            logErrors();
+            throw e;
+        }
     }
 
     @Override
@@ -147,8 +212,48 @@ public class FileCachedIndexInput extends IndexInput implements RandomAccessInpu
             // origin never reference it itself, only clone needs decRef here
             if (isClone) {
                 cache.decRef(filePath);
+            } else {
+                try {
+                    throw new Exception("Throwing exception to print stack trace of closing the lucene index input");
+                } catch (Exception e) {
+                    error = e;
+                }
             }
             closed = true;
+        }
+    }
+
+    private void logErrors() {
+        StringBuilder stringBuilder = new StringBuilder("Operation failed in FileCachedIndexInput \n");
+        stringBuilder.append("FileCachedIndexInput : ").append(this).append("\n")
+            .append("isClone : ").append(isClone).append("\n")
+            .append("isClosed : ").append(closed);
+        try {
+            stringBuilder.append("length : ").append(length()).append("\n")
+                .append("file_pointer : ").append(getFilePointer());
+            CachedIndexInput indexInput = cache.get(filePath);
+            if (indexInput != null) {
+                stringBuilder.append("File cache entry present, isClosed : ").append(indexInput.isClosed());
+                cache.decRef(filePath);
+            } else {
+                stringBuilder.append("File cache entry not present ");
+            }
+        } catch (Exception e) {
+            logger.error("Error while getting file length and file pointer of FileCachedIndexInput", e);
+            e.printStackTrace();
+        }
+        logger.error(stringBuilder);
+        try {
+            throw new Exception("Throwing exception to log stacktrace");
+        } catch (Exception e) {
+            logger.error("Stack trace of error : ");
+            e.printStackTrace();
+            if (error == null) {
+                logger.error("IndexInput not closed yet, hence no stacktrace of closing");
+            } else {
+                logger.error("Stack trace of index input being closed : ");
+                error.printStackTrace();
+            }
         }
     }
 }
