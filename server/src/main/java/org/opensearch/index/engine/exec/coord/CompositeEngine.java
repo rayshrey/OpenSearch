@@ -693,9 +693,8 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
         ));
         refreshListeners.forEach(POST_REFRESH_LISTENER_CONSUMER);
 
-        //        TODO: Enable merge
-        //        // trigger merges
-        //        triggerPossibleMerges();
+        // trigger merges
+        triggerPossibleMerges();
     }
 
     public void applyMergeChanges(MergeResult mergeResult, OneMerge oneMerge) {
@@ -710,7 +709,7 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
                 WriterFileSet writerFileSet = WriterFileSet.builder()
                     .directory(Path.of(mergedFile.directory()))
                     .writerGeneration(0)
-                    .addFile(mergedFile.directory() + "/" + mergedFile.file())
+                    .addFile(mergedFile.file())
                     .build();
                 refreshInput.add(writerFileSet);
             });
@@ -719,7 +718,7 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
                 WriterFileSet writerFileSet = WriterFileSet.builder()
                     .directory(Path.of(fileToMerge.directory()))
                     .writerGeneration(0)
-                    .addFile(fileToMerge.directory() + "/" + fileToMerge.file())
+                    .addFile(fileToMerge.file())
                     .build();
                 refreshInput.addFilesToRemove(writerFileSet);
             });
