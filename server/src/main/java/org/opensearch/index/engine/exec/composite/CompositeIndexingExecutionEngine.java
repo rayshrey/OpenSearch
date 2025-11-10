@@ -30,7 +30,9 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine<Any> {
 
@@ -146,5 +148,13 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
 
     public CompositeDataFormatWriterPool getDataFormatWriterPool() {
         return dataFormatWriterPool;
+    }
+
+    @Override
+    public void deleteFiles(Set<String> filesToDelete) throws IOException {
+        // Delegate file deletion to all engines
+        for (IndexingExecutionEngine<?> delegate : delegates) {
+            delegate.deleteFiles(filesToDelete);
+        }
     }
 }

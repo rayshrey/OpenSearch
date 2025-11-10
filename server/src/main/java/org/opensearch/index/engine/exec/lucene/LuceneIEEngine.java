@@ -29,6 +29,7 @@ import org.opensearch.index.shard.ShardPath;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 
 public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.LuceneDataFormat> {
 
@@ -68,6 +69,9 @@ public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.Lucene
     public DataFormat getDataFormat() {
         return DataFormat.LUCENE;
     }
+
+    @Override
+    public void deleteFiles(Set<String> filesToDelete) throws IOException {}
 
     public static class LuceneDocumentInput implements DocumentInput<ParseContext.Document> {
 

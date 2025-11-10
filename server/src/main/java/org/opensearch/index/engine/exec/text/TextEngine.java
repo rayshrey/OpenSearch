@@ -75,6 +75,9 @@ public class TextEngine implements IndexingExecutionEngine<TextDF> {
         return refreshResult;
     }
 
+    @Override
+    public void deleteFiles(Set<String> filesToDelete) throws IOException {}
+
     public static class TextInput implements DocumentInput<String> {
 
         private final StringBuilder sb = new StringBuilder();

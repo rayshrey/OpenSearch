@@ -19,8 +19,10 @@ import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -120,5 +122,16 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
     @Override
     public DataFormat getDataFormat() {
         return new ParquetDataFormat();
+    }
+
+    @Override
+    public void deleteFiles(Set<String> filesToDelete) throws IOException {
+        for (String filePath : filesToDelete) {
+            // Only delete parquet files
+            if (filePath.endsWith(".parquet")) {
+                Files.deleteIfExists(Paths.get(filePath));
+                System.out.println("Deleted parquet file: " + filePath);
+            }
+        }
     }
 }

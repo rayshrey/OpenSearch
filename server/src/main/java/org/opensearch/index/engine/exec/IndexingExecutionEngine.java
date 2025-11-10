@@ -12,6 +12,8 @@ import org.opensearch.index.shard.ShardPath;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public interface IndexingExecutionEngine<T extends DataFormat> {
 
@@ -27,4 +29,6 @@ public interface IndexingExecutionEngine<T extends DataFormat> {
     DataFormat getDataFormat();
 
     void loadWriterFiles(ShardPath shardPath) throws IOException;
+
+    void deleteFiles(Set<String> filesToDelete) throws IOException;
 }

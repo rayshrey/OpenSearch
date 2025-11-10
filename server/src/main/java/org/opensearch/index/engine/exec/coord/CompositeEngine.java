@@ -16,6 +16,7 @@ import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.logging.Loggers;
+import org.opensearch.common.util.concurrent.AbstractRefCounted;
 import org.opensearch.common.util.concurrent.KeyedLock;
 import org.opensearch.common.util.concurrent.ReleasableLock;
 import org.opensearch.common.util.io.IOUtils;
@@ -77,14 +78,7 @@ import org.opensearch.plugins.SearchEnginePlugin;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -144,6 +138,7 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
 
     @Nullable
     protected final String historyUUID;
+    private final IndexFileDeleter indexFileDeleter;
 
     private final LocalCheckpointTracker localCheckpointTracker;
     private final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
@@ -212,6 +207,11 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
                 this.catalogSnapshot = lastCommittedCatalogSnapshot;
                 lastCommittedWriterGeneration.set(lastCommittedCatalogSnapshot.getLastWriterGeneration());
             });
+            if (catalogSnapshot == null) {
+                System.out.println("Initialising CATALOG SNAPSHOT - No catalog Snapshot to recover from");
+            } else {
+                System.out.println("Initialising CATALOG SNAPSHOT - " + catalogSnapshot);
+            }
             // How to bring the Dataformat here? Currently, this means only Text and LuceneFormat can be used
             this.engine = new CompositeIndexingExecutionEngine(
                 mapperService,
@@ -220,6 +220,12 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
                 lastCommittedWriterGeneration.incrementAndGet()
             );
             this.engine.loadWriterFiles(shardPath);
+
+            // Initialize IndexFileDeleter
+            this.indexFileDeleter = new IndexFileDeleter(this.engine, catalogSnapshot, shardPath);
+            CatalogSnapshot.setIndexFileDeleter(this.indexFileDeleter);
+
+            System.out.println("IndexFile Deleter after initialising : " + indexFileDeleter);
 
             // initialize local checkpoint tracker and translog manager
             this.localCheckpointTracker = createLocalCheckpointTracker(localCheckpointTrackerSupplier);
@@ -682,8 +688,11 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
             throw new RuntimeException(ex);
         }
 
-        newCatSnap.incRef();
+        //printStackTrace("Stacktrace while refresh : ");
+        //System.out.println("Doing incRef for CatalogSnapshot(refresh) - " + newCatSnap);
+        //newCatSnap.incRef();
         if (catalogSnapshot != null) {
+            System.out.println("Doing decRef for CatalogSnapshot(refresh) - " + catalogSnapshot);
             catalogSnapshot.decRef();
         }
         catalogSnapshot = newCatSnap;
@@ -692,6 +701,8 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
             refreshListener
         ));
         refreshListeners.forEach(POST_REFRESH_LISTENER_CONSUMER);
+
+        System.out.println("IndexFile Deleter after REFRESH : " + indexFileDeleter);
 
         // trigger merges
         triggerPossibleMerges();
@@ -741,10 +752,14 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
     // this now becomes equivalent of the reader
     // Each search side specific impl can decide on how to init specific reader instances using this pit snapshot provided by writers
     public ReleasableRef<CatalogSnapshot> acquireSnapshot() {
+        System.out.println("Doing incRef for CatalogSnapshot(acquireSnapshot) - " + catalogSnapshot);
+        //printStackTrace("Stacktrace while incRef(acquireSnapshot) : ");
         catalogSnapshot.incRef(); // this should be package-private
         return new ReleasableRef<CatalogSnapshot>(catalogSnapshot) {
             @Override
             public void close() throws Exception {
+                System.out.println("Doing decRef for CatalogSnapshot(acquireSnapshot) - " + catalogSnapshot);
+                //printStackTrace("Stacktrace while decRef(acquireSnapshot) : ");
                 catalogSnapshot.decRef(); // this should be package-private
             }
         };
@@ -808,7 +823,7 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
         boolean upgradeOnlyAncientSegments,
         String forceMergeUUID
     ) throws EngineException, IOException {
-
+        mergeScheduler.forceMerge(maxNumSegments);
     }
 
     @Override
@@ -846,6 +861,8 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
                         translogManager.rollTranslogGeneration();
                         logger.trace("starting commit for flush; commitTranslog=true");
                         final CatalogSnapshot catalogSnapshotToFlush = catalogSnapshot;
+                        final Optional<CatalogSnapshot> previousCatalogSnapshot = compositeEngineCommitter.readLastCommittedCatalogSnapshot();
+                        catalogSnapshotToFlush.incRef();
                         final String serializedCatalogSnapshot = catalogSnapshotToFlush.serializeToString();
                         final long lastWriterGeneration = catalogSnapshotToFlush.getLastWriterGeneration();
                         final long localCheckpoint = localCheckpointTracker.getProcessedCheckpoint();
@@ -863,7 +880,14 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
                             }, catalogSnapshotToFlush
                         );
                         logger.trace("finished commit for flush");
-
+                        previousCatalogSnapshot.ifPresent(AbstractRefCounted::decRef);
+                        System.out.println("FLUSHING DATA : ");
+                        if (previousCatalogSnapshot.isPresent()) {
+                            System.out.println("Catalog Snapshot before flushing - " + previousCatalogSnapshot.get());
+                        } else {
+                            System.out.println("Catalog Snapshot before flushing - No catalog Snapshot found ");
+                        }
+                        System.out.println("Catalog Snapshot after flushing - " + catalogSnapshotToFlush);
                         translogManager.trimUnreferencedReaders();
                     } catch (AlreadyClosedException e) {
                         // TODO - failOnTragicEvent(e);
@@ -917,5 +941,24 @@ public class CompositeEngine implements LifecycleAware, Indexer, CheckpointState
     @Override
     public String getHistoryUUID() {
         return historyUUID;
+    }
+
+    public static void printStackTrace(String message) {
+        int maxDepth = 6;
+        try {
+            throw new RuntimeException("dummy");
+        } catch (RuntimeException e) {
+            System.err.println(message + e.toString());
+            StackTraceElement[] trace = e.getStackTrace();
+            int depth = Math.min(trace.length, maxDepth);
+
+            for (int i = 0; i < depth; i++) {
+                System.err.println("\tat " + trace[i]);
+            }
+
+            if (trace.length > maxDepth) {
+                System.err.println("\t... " + (trace.length - maxDepth) + " more");
+            }
+        }
     }
 }

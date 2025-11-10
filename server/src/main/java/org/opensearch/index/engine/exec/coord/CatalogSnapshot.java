@@ -36,7 +36,8 @@ public class CatalogSnapshot extends AbstractRefCounted implements Writeable {
     public static final String LAST_COMPOSITE_WRITER_GEN_KEY = "_last_composite_writer_gen_";
     private final long id;
     private long lastWriterGeneration;
-    private final Map<String, Collection<WriterFileSet>> dfGroupedSearchableFiles;
+    public final Map<String, Collection<WriterFileSet>> dfGroupedSearchableFiles;
+    private static IndexFileDeleter indexFileDeleter;
 
     public CatalogSnapshot(RefreshResult refreshResult, long id) {
         super("catalog_snapshot");
@@ -47,6 +48,11 @@ public class CatalogSnapshot extends AbstractRefCounted implements Writeable {
             dfGroupedSearchableFiles.put(dataFormat.name(), writerFiles);
             writerFiles.stream().mapToLong(WriterFileSet::getWriterGeneration).max().ifPresent(value -> this.lastWriterGeneration = value);
         });
+        indexFileDeleter.addFileReferences(this);
+    }
+
+    public static void setIndexFileDeleter(IndexFileDeleter deleter) {
+        indexFileDeleter = deleter;
     }
 
     public CatalogSnapshot(StreamInput in) throws IOException {
@@ -113,7 +119,10 @@ public class CatalogSnapshot extends AbstractRefCounted implements Writeable {
 
     @Override
     protected void closeInternal() {
-        // notify to file deleter, search, etc
+        // Remove file references when snapshot is closed
+        if (indexFileDeleter != null) {
+            indexFileDeleter.removeFileReferences(this);
+        }
     }
 
     public long getId() {
