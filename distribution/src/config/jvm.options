@@ -19,8 +19,8 @@
 # Xms represents the initial size of total heap space
 # Xmx represents the maximum size of total heap space
 
--Xms${heap.min}
--Xmx${heap.max}
+#-Xms${heap.min}
+#-Xmx${heap.max}
 
 ################################################################
 ## Expert settings
@@ -88,8 +88,8 @@ ${error.file}
 21-:--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED
 
 # Heap size settings
-# -Xms32g
-# -Xmx32g
+-Xms32g
+-Xmx32g
 
 # Enable native memory tracking
 -XX:NativeMemoryTracking=summary
@@ -104,3 +104,6 @@ ${error.file}
 # prevent issues like "leaked" maps or performance degradation. A value of 1 effectively
 # disables the shared Arena pooling and uses a confined Arena for each MMapDirectory
 -Dorg.apache.lucene.store.MMapDirectory.sharedArenaMaxPermits=1
+
+-javaagent:/home/ec2-user/codeguru-profiler-java-agent-standalone-1.2.4.jar=profilingGroupName:Parquet-Merge,heapSummaryEnabled:true
+-Djava.security.policy=/home/ec2-user/rayshreyOpenSearch/OpenSearch/distribution/src/config/policy
