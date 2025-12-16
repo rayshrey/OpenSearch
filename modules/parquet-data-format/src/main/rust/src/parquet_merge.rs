@@ -152,6 +152,7 @@ fn create_writer(output_path: &str, schema: SchemaRef) -> Result<ArrowWriter<Fil
     let props = WriterProperties::builder()
         .set_write_batch_size(WRITER_BATCH_SIZE)
         .set_compression(Compression::ZSTD(Default::default()))
+        .set_bloom_filter_enabled(true)
         .build();
 
     let out_file = File::create(output_path)

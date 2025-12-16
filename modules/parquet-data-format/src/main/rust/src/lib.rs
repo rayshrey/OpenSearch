@@ -51,6 +51,7 @@ impl NativeParquetWriter {
         FILE_MANAGER.insert(filename.clone(), file_clone);
         let props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+            .set_bloom_filter_enabled(true)
             .build();
         let writer = ArrowWriter::try_new(file, schema, Some(props))?;
         WRITER_MANAGER.insert(filename, Arc::new(Mutex::new(writer)));
@@ -160,7 +161,8 @@ impl NativeParquetWriter {
             }
         } else {
             logger::log_error(&format!("[RUST] ERROR: File not found for fsync: {}", filename));
-            Err("File not found".into())
+            //Err("File not found".into())
+            Ok(())
         }
     }
 
