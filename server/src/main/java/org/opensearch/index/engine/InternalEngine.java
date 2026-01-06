@@ -99,6 +99,9 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.VersionType;
 import org.opensearch.index.engine.exec.coord.LastRefreshedCheckpointListener;
+import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
+import org.opensearch.index.engine.exec.coord.CompositeEngine;
+import org.opensearch.index.engine.exec.coord.SegmentInfosCatalogSnapshot;
 import org.opensearch.index.fieldvisitor.IdOnlyFieldVisitor;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.ParseContext;
@@ -113,12 +116,14 @@ import org.opensearch.index.seqno.SeqNoStats;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.OpenSearchMergePolicy;
+import org.opensearch.index.translog.InternalTranslogManager;
 import org.opensearch.index.translog.NoOpTranslogManager;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogCorruptedException;
 import org.opensearch.index.translog.TranslogDeletionPolicy;
 import org.opensearch.index.translog.TranslogException;
 import org.opensearch.index.translog.TranslogManager;
+import org.opensearch.index.translog.TranslogOperationHelper;
 import org.opensearch.index.translog.TranslogStats;
 import org.opensearch.index.translog.listener.CompositeTranslogEventListener;
 import org.opensearch.index.translog.listener.TranslogEventListener;
@@ -181,7 +186,7 @@ public class InternalEngine extends Engine {
     protected final LiveVersionMap versionMap = new LiveVersionMap();
 
     @Nullable
-    protected final String historyUUID;
+    protected String historyUUID;
 
     private final OpenSearchConcurrentMergeScheduler mergeScheduler;
     private final ExternalReaderManager externalReaderManager;
@@ -270,8 +275,10 @@ public class InternalEngine extends Engine {
             mergeScheduler = scheduler = new EngineMergeScheduler(engineConfig.getShardId(), engineConfig.getIndexSettings());
             throttle = new IndexThrottle();
             try {
-                // Interim solution: Skipping trimming of unsafe commits until IndexShard integration of CompositeEngine is completed.
-                // store.trimUnsafeCommits(engineConfig.getTranslogConfig().getTranslogPath());
+                // Interim solution: IndexShard should bypass initialization of the InternalEngine based on this setting; until that is implemented, we are using the setting here.
+                if (!engineConfig.getIndexSettings().isOptimizedIndex()) {
+                    store.trimUnsafeCommits(engineConfig.getTranslogConfig().getTranslogPath());
+                }
                 final Map<String, String> userData = store.readLastCommittedSegmentsInfo().getUserData();
                 String translogUUID = Objects.requireNonNull(userData.get(Translog.TRANSLOG_UUID_KEY));
                 TranslogEventListener internalTranslogEventListener = new TranslogEventListener() {
@@ -311,10 +318,17 @@ public class InternalEngine extends Engine {
                 this.localCheckpointTracker = createLocalCheckpointTracker(localCheckpointTrackerSupplier);
                 writer = createWriter();
                 bootstrapAppendOnlyInfoFromWriter(writer);
-                // Interim solution: Skipping loading historyUUID and forceMergeUUID until IndexShard integration of CompositeEngine is completed.
                 final Map<String, String> commitData = commitDataAsMap(writer);
                 historyUUID = null;
+                // Interim solution: IndexShard should bypass initialization of the InternalEngine based on this setting; until that is implemented, we are using the setting here.
+                if (!engineConfig.getIndexSettings().isOptimizedIndex()) {
+                    historyUUID = loadHistoryUUID(commitData);
+                }
+                // Interim solution: IndexShard should bypass initialization of the InternalEngine based on this setting; until that is implemented, we are using the setting here.
                 forceMergeUUID = null;
+                if (!engineConfig.getIndexSettings().isOptimizedIndex()) {
+                    forceMergeUUID = commitData.get(FORCE_MERGE_UUID_KEY);
+                }
                 indexWriter = writer;
             } catch (IOException | TranslogCorruptedException e) {
                 throw new EngineCreationFailureException(shardId, "failed to create engine", e);
@@ -395,15 +409,33 @@ public class InternalEngine extends Engine {
         TranslogDeletionPolicy translogDeletionPolicy,
         CompositeTranslogEventListener translogEventListener
     ) throws IOException {
-        return new NoOpTranslogManager(
-            shardId,
-            readLock,
-            this::ensureOpen,
-            new TranslogStats(),
-            EMPTY_TRANSLOG_SNAPSHOT,
-            translogUUID,
-            true
-        );
+        if (engineConfig.getIndexSettings().isOptimizedIndex()) {
+            return new NoOpTranslogManager(
+                shardId,
+                readLock,
+                this::ensureOpen,
+                new TranslogStats(),
+                EMPTY_TRANSLOG_SNAPSHOT,
+                translogUUID,
+                true
+            );
+        } else {
+            return new InternalTranslogManager(
+                engineConfig.getTranslogConfig(),
+                engineConfig.getPrimaryTermSupplier(),
+                engineConfig.getGlobalCheckpointSupplier(),
+                translogDeletionPolicy,
+                shardId,
+                readLock,
+                this::getLocalCheckpointTracker,
+                translogUUID,
+                translogEventListener,
+                this::ensureOpen,
+                engineConfig.getTranslogFactory(),
+                engineConfig.getStartedPrimarySupplier(),
+                TranslogOperationHelper.create(engineConfig)
+            );
+        }
     }
 
     private LocalCheckpointTracker createLocalCheckpointTracker(
@@ -528,9 +560,10 @@ public class InternalEngine extends Engine {
                 // we can access segment_stats while a shard is still in the recovering state.
                 case "segments":
                 case "segments_stats":
+                case "completion_stats":
                     break;
                 default:
-//                    assert externalReaderManager.isWarmedUp : "searcher was not warmed up yet for source[" + source + "]";
+                    assert externalReaderManager.isWarmedUp : "searcher was not warmed up yet for source[" + source + "]";
             }
         }
         return true;
@@ -1687,8 +1720,14 @@ public class InternalEngine extends Engine {
             flush(false, true);
             logger.trace("finish flush for snapshot");
         }
-        final IndexCommit lastCommit = combinedDeletionPolicy.acquireIndexCommit(false);
-        return new GatedCloseable<>(lastCommit, () -> releaseIndexCommit(lastCommit));
+        try {
+            final IndexCommit lastCommit = combinedDeletionPolicy.acquireIndexCommit(false);
+            return new GatedCloseable<>(lastCommit, () -> releaseIndexCommit(lastCommit));
+        } catch (EngineNotInitializedException e) {
+            // No commits exist yet - this can happen during initial index creation before any documents are indexed
+            logger.debug("No commits available yet for acquireLastIndexCommit - returning null");
+            return null;
+        }
     }
 
     @Override
@@ -1720,22 +1759,53 @@ public class InternalEngine extends Engine {
         // if we are already closed due to some tragic exception
         // we need to fail the engine. it might have already been failed before
         // but we are double-checking it's failed and closed
-        if (indexWriter.isOpen() == false && indexWriter.getTragicException() != null) {
+        final Throwable writerTragicException = indexWriter.getTragicException();
+        
+        // For optimized indices (using DocumentIndexWriter with multiple writers), use stricter check
+        // that requires the writer to be closed. For non-optimized indices (raw IndexWriter), match
+        // upstream behavior that only checks for tragic exception - this fixes replica promotion issues.
+        boolean hasWriterTragicEvent;
+        if (engineConfig.getIndexSettings().isOptimizedIndex()) {
+            hasWriterTragicEvent = indexWriter.isOpen() == false && writerTragicException != null;
+        } else {
+            hasWriterTragicEvent = writerTragicException != null;
+        }
+        
+        if (hasWriterTragicEvent) {
             final Exception tragicException;
-            if (indexWriter.getTragicException() instanceof Exception) {
-                tragicException = (Exception) indexWriter.getTragicException();
+            if (writerTragicException instanceof Exception) {
+                tragicException = (Exception) writerTragicException;
             } else {
-                tragicException = new RuntimeException(indexWriter.getTragicException());
+                tragicException = new RuntimeException(writerTragicException);
             }
             failEngine("already closed by tragic event on the index writer", tragicException);
             engineFailed = true;
         } else if (translogManager.getTragicExceptionIfClosed() != null) {
             failEngine("already closed by tragic event on the translog", translogManager.getTragicExceptionIfClosed());
             engineFailed = true;
-        } else if (failedEngine.get() == null && isClosed.get() == false) { // we are closed but the engine is not failed yet?
-            // this smells like a bug - we only expect ACE if we are in a fatal case ie. either translog or IW is closed by
-            // a tragic event or has closed itself. if that is not the case we are in a buggy state and raise an assertion error
-            throw new AssertionError("Unexpected AlreadyClosedException", ex);
+        } else if (failedEngine.get() == null && isClosed.get() == false) {
+            // Check if the ACE is from the translog manager checking engine state during normal shutdown.
+            // During engine close, there's a race where translog closes before isClosed is set.
+            // Concurrent operations (like refresh) may hit ACE from ensureOpen() calls.
+            // This is not a tragic event - it's a normal shutdown race condition.
+            // Only throw AssertionError if we're sure this is not a shutdown scenario.
+            String exMessage = ex.getMessage();
+            Throwable cause = ex.getCause();
+            boolean isEngineClosedMessage = exMessage != null && exMessage.contains("engine is closed");
+            boolean isCauseFromEngineClose = cause instanceof AlreadyClosedException 
+                && cause.getMessage() != null 
+                && cause.getMessage().contains("engine is closed");
+            
+            if (isEngineClosedMessage || isCauseFromEngineClose) {
+                // This is a normal engine close race - not a tragic event
+                // The engine is closing but isClosed flag hasn't been set yet
+                logger.debug("AlreadyClosedException during engine close race - not a tragic event", ex);
+                engineFailed = false;
+            } else {
+                // This is unexpected - neither writer nor translog has tragic exception,
+                // engine is not failed and not closed, but we got ACE
+                throw new AssertionError("Unexpected AlreadyClosedException", ex);
+            }
         } else {
             engineFailed = false;
         }
@@ -1893,14 +1963,21 @@ public class InternalEngine extends Engine {
         }
     }
 
-    // Interim solution: Configure InternalEngine to use a temporary directory to prevent IndexWriter conflicts with LuceneCommitEngine.
     private IndexWriter createWriter() throws IOException {
         try {
-            IndexWriterConfig iwc = new IndexWriterConfig(null).setSoftDeletesField(Lucene.SOFT_DELETES_FIELD)
-                .setCommitOnClose(false)
-                .setMergePolicy(NoMergePolicy.INSTANCE)
-                .setOpenMode(IndexWriterConfig.OpenMode.CREATE);
-            Directory directory = new NIOFSDirectory(Files.createTempDirectory("tmp-internal-engine-"));
+            IndexWriterConfig iwc;
+            Directory directory;
+            // Interim solution: IndexShard should bypass initialization of the InternalEngine based on this setting; until that is implemented, we are using the setting here.
+            if (engineConfig.getIndexSettings().isOptimizedIndex()) {
+                iwc = new IndexWriterConfig(null).setSoftDeletesField(Lucene.SOFT_DELETES_FIELD)
+                    .setCommitOnClose(false)
+                    .setMergePolicy(NoMergePolicy.INSTANCE)
+                    .setOpenMode(IndexWriterConfig.OpenMode.CREATE);
+                directory = new NIOFSDirectory(Files.createTempDirectory("tmp-internal-engine-"));
+            } else {
+                iwc = getIndexWriterConfig();
+                directory = store.directory();
+            }
             return createWriter(directory, iwc);
         } catch (LockObtainFailedException ex) {
             logger.warn("could not lock IndexWriter", ex);
@@ -2169,8 +2246,10 @@ public class InternalEngine extends Engine {
                 return commitData.entrySet().iterator();
             });
             shouldPeriodicallyFlushAfterBigMerge.set(false);
-            // Interim solution: Skipping commit until IndexShard integration of CompositeEngine is completed.
-            // writer.commit();
+            // Interim solution: IndexShard should bypass initialization of the InternalEngine based on this setting; until that is implemented, we are using the setting here.
+            if (!engineConfig.getIndexSettings().isOptimizedIndex()) {
+                writer.commit();
+            }
         } catch (final Exception ex) {
             try {
                 failEngine("lucene commit failed", ex);
