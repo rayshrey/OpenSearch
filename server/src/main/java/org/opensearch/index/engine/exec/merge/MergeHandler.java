@@ -8,8 +8,6 @@
 
 package org.opensearch.index.engine.exec.merge;
 
-import org.opensearch.index.engine.exec.coord.Segment;
-
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.common.logging.Loggers;
@@ -43,7 +41,7 @@ public abstract class MergeHandler {
     private CompositeEngine compositeEngine;
     private Map<DataFormat, Merger> dataFormatMergerMap;
     private final Deque<OneMerge> mergingSegments = new ArrayDeque<>();
-    private final Set<Segment> currentlyMergingSegments = new HashSet<>();
+    private final Set<CatalogSnapshot.Segment> currentlyMergingSegments = new HashSet<>();
     private final Logger logger;
     private final ShardId shardId;
 
@@ -79,7 +77,7 @@ public abstract class MergeHandler {
         Collection<OneMerge> oneMerges = findMerges();
         for (OneMerge oneMerge : oneMerges) {
             boolean isValidMerge = true;
-            for (Segment segment : oneMerge.getSegmentsToMerge()) {
+            for (CatalogSnapshot.Segment segment : oneMerge.getSegmentsToMerge()) {
                 if (currentlyMergingSegments.contains(segment)) {
                     isValidMerge = false;
                     break;
@@ -94,8 +92,8 @@ public abstract class MergeHandler {
     public synchronized void registerMerge(OneMerge merge) {
         try (CompositeEngine.ReleasableRef<CatalogSnapshot> catalogSnapshotReleasableRef = compositeEngine.acquireSnapshot()) {
             // Validate segments exist in catalog
-            List<Segment> catalogSegments = catalogSnapshotReleasableRef.getRef().getSegments();
-            for (Segment mergeSegment : merge.getSegmentsToMerge()) {
+            List<CatalogSnapshot.Segment> catalogSegments = catalogSnapshotReleasableRef.getRef().getSegments();
+            for (CatalogSnapshot.Segment mergeSegment : merge.getSegmentsToMerge()) {
                 if (!catalogSegments.contains(mergeSegment)) {
                     return;
                 }
@@ -203,7 +201,7 @@ public abstract class MergeHandler {
 
     private List<WriterFileSet> getFilesToMerge(OneMerge oneMerge, DataFormat dataFormat) {
         List<WriterFileSet> writerFileSets = new ArrayList<>();
-        for (Segment segment : oneMerge.getSegmentsToMerge()) {
+        for (CatalogSnapshot.Segment segment : oneMerge.getSegmentsToMerge()) {
             writerFileSets.add(segment.getDFGroupedSearchableFiles().get(dataFormat.name()));
         }
         return writerFileSets;

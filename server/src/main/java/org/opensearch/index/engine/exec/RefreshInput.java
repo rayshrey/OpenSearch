@@ -8,8 +8,6 @@
 
 package org.opensearch.index.engine.exec;
 
-import org.opensearch.index.engine.exec.coord.Segment;
-
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 
 import java.util.ArrayList;
@@ -17,7 +15,7 @@ import java.util.List;
 
 public class RefreshInput {
 
-    private List<Segment> existingSegments;
+    private List<CatalogSnapshot.Segment> existingSegments;
     private final List<WriterFileSet> writerFiles;
 
     public RefreshInput() {
@@ -25,7 +23,7 @@ public class RefreshInput {
         this.existingSegments = new ArrayList<>();
     }
 
-    public void setExistingSegments(List<Segment> existingSegments) {
+    public void setExistingSegments(List<CatalogSnapshot.Segment> existingSegments) {
         this.existingSegments = existingSegments;
     }
 
@@ -37,7 +35,7 @@ public class RefreshInput {
         return writerFiles;
     }
 
-    public List<Segment> getExistingSegments() {
+    public List<CatalogSnapshot.Segment> getExistingSegments() {
         return existingSegments;
     }
 }

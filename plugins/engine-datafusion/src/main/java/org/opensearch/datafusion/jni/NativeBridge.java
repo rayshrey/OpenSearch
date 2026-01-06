@@ -9,9 +9,7 @@
 package org.opensearch.datafusion.jni;
 
 import org.opensearch.core.action.ActionListener;
-import org.opensearch.index.engine.exec.FileStats;
-
-import java.util.Map;
+import org.opensearch.datafusion.ObjectResultCallback;
 
 /**
  * Core JNI bridge to native DataFusion library.
@@ -40,9 +38,6 @@ public final class NativeBridge {
     // Query execution
     public static native void executeQueryPhaseAsync(long readerPtr, String tableName, byte[] plan, boolean isQueryPlanExplainEnabled, long runtimePtr, ActionListener<Long> listener);
     public static native long executeFetchPhase(long readerPtr, long[] rowIds, String[] includeFields, String[] excludeFields, long runtimePtr);
-
-    // File Stats
-    public static native void fetchSegmentStats(long readerPtr, ActionListener<Map<String, FileStats>> listener);
 
     // Stream operations
     public static native void streamNext(long runtime, long stream, ActionListener<Long> listener);

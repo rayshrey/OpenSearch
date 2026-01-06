@@ -8,7 +8,6 @@
 
 package org.opensearch.index.engine.exec.commit;
 
-import org.opensearch.index.engine.CommitStats;
 import org.opensearch.index.engine.SafeCommitInfo;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 
@@ -22,9 +21,7 @@ public interface Committer extends Closeable {
 
     CommitPoint commit(Iterable<Map.Entry<String, String>> commitData, CatalogSnapshot catalogSnapshot);
 
-    Map<String, String> getLastCommittedData();
-
-    CommitStats getCommitStats();
+    Map<String, String> getLastCommittedData() throws IOException;
 
     SafeCommitInfo getSafeCommitInfo();
 }

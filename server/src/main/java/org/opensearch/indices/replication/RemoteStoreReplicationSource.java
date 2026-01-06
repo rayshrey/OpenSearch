@@ -30,7 +30,10 @@ import org.opensearch.indices.replication.checkpoint.RemoteStoreMergedSegmentChe
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -136,12 +139,8 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
             }
             logger.debug("Downloading format-aware segment files from remote store {}", filesToFetch);
             if (remoteMetadataExists()) {
-                final Directory storeDirectory = indexShard.isOptimizedIndex()
-                    ? indexShard.store().compositeStoreDirectory()
-                    : indexShard.store().directory();
-                final List<FileMetadata> directoryFiles = Arrays.stream(storeDirectory.listAll()).map(
-                    file -> indexShard.isOptimizedIndex() ? new FileMetadata(file) : new FileMetadata("lucene", file)
-                ).collect(Collectors.toList());
+                final CompositeStoreDirectory storeDirectory = indexShard.store().compositeStoreDirectory();
+                final List<FileMetadata> directoryFiles = List.of(storeDirectory.listFileMetadata());
 
                 final List<FileMetadata> toDownloadFileMetadata = new ArrayList<>();
 
@@ -156,7 +155,6 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
                     if (directoryFiles.contains(fileMetadata)) {
                         logger.info("ReplicationCheckpoint: {}, filesToFetch: {}", checkpoint.getSegmentInfosVersion(), filesToFetch);
                         logger.info(directoryFiles);
-                        continue;
                     }
                     assert directoryFiles.contains(fileMetadata) == false : "Local store already contains the file " + fileMetadata;
 
@@ -166,16 +164,7 @@ public class RemoteStoreReplicationSource implements SegmentReplicationSource {
                 }
 
                 // Use CompositeStoreDirectory with format-aware progress tracking
-                final ReplicationStatsDirectoryWrapper statsWrapper = indexShard.isOptimizedIndex()
-                    ? new CompositeStoreDirectoryStatsWrapper((CompositeStoreDirectory) storeDirectory, fileProgressTracker)
-                    : new ReplicationStatsDirectoryWrapper(storeDirectory, fileProgressTracker);
-
-                // After the for loop that builds toDownloadFileMetadata
-                if (toDownloadFileMetadata.isEmpty()) {
-                    logger.debug("All files already exist locally, skipping download");
-                    listener.onResponse(new GetSegmentFilesResponse(filesToFetch));
-                    return;
-                }
+                final CompositeStoreDirectoryStatsWrapper statsWrapper = new CompositeStoreDirectoryStatsWrapper(storeDirectory, fileProgressTracker);
 
                 indexShard.getFileDownloader()
                     .downloadAsync(

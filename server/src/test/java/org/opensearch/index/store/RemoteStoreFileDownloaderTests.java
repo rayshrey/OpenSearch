@@ -71,10 +71,9 @@ public class RemoteStoreFileDownloaderTests extends OpenSearchTestCase {
             files.put(filename, content);
         }
         fileDownloader = new RemoteStoreFileDownloader(
-                ShardId.fromString("[RemoteStoreFileDownloaderTests][0]"),
-                threadPool,
-                recoverySettings,
-                false
+            ShardId.fromString("[RemoteStoreFileDownloaderTests][0]"),
+            threadPool,
+            recoverySettings
         );
     }
 

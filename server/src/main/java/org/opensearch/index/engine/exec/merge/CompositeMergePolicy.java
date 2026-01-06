@@ -8,8 +8,6 @@
 
 package org.opensearch.index.engine.exec.merge;
 
-import org.opensearch.index.engine.exec.coord.Segment;
-
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.lucene.codecs.Codec;
@@ -69,8 +67,8 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
         };
     }
 
-    public List<List<Segment>> findForceMergeCandidates(List<Segment> segments, int maxSegmentCount) throws IOException {
-        Map<SegmentCommitInfo, Segment> segmentMap = new HashMap<>();
+    public List<List<CatalogSnapshot.Segment>> findForceMergeCandidates(List<CatalogSnapshot.Segment> segments, int maxSegmentCount) throws IOException {
+        Map<SegmentCommitInfo, CatalogSnapshot.Segment> segmentMap = new HashMap<>();
         SegmentInfos segmentInfos = convertToSegmentInfos(segments, segmentMap);
 
         Map<SegmentCommitInfo, Boolean> segmentsToMerge = new HashMap<>();
@@ -87,8 +85,8 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
         }
     }
 
-    public List<List<Segment>> findMergeCandidates(List<Segment> segments) throws IOException {
-        Map<SegmentCommitInfo, Segment> segmentMap = new HashMap<>();
+    public List<List<CatalogSnapshot.Segment>> findMergeCandidates(List<CatalogSnapshot.Segment> segments) throws IOException {
+        Map<SegmentCommitInfo, CatalogSnapshot.Segment> segmentMap = new HashMap<>();
         SegmentInfos segmentInfos = convertToSegmentInfos(segments, segmentMap);
 
         try {
@@ -103,12 +101,12 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
     }
 
     private SegmentInfos convertToSegmentInfos(
-        List<Segment> segments,
-        Map<SegmentCommitInfo, Segment> segmentMap
+        List<CatalogSnapshot.Segment> segments,
+        Map<SegmentCommitInfo, CatalogSnapshot.Segment> segmentMap
     ) throws IOException {
         SegmentInfos segmentInfos = new SegmentInfos(Version.LATEST.major);
 
-        for (Segment segment : segments) {
+        for (CatalogSnapshot.Segment segment : segments) {
             SegmentWrapper wrapper = new SegmentWrapper(segment, calculateSegmentSize(segment));
             segmentInfos.add(wrapper);
             segmentMap.put(wrapper, segment);
@@ -117,15 +115,15 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
         return segmentInfos;
     }
 
-    private List<List<Segment>> convertMergeSpecification(
+    private List<List<CatalogSnapshot.Segment>> convertMergeSpecification(
         MergePolicy.MergeSpecification mergeSpecification,
-        Map<SegmentCommitInfo, Segment> segmentMap
+        Map<SegmentCommitInfo, CatalogSnapshot.Segment> segmentMap
     ) {
-        List<List<Segment>> merges = new ArrayList<>();
+        List<List<CatalogSnapshot.Segment>> merges = new ArrayList<>();
 
         if (mergeSpecification != null) {
             for (MergePolicy.OneMerge merge : mergeSpecification.merges) {
-                List<Segment> segmentMerge = new ArrayList<>();
+                List<CatalogSnapshot.Segment> segmentMerge = new ArrayList<>();
                 for (SegmentCommitInfo segment : merge.segments) {
                     segmentMerge.add(segmentMap.get(segment));
                 }
@@ -156,7 +154,7 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
         return Collections.unmodifiableSet(mergingSegments);
     }
 
-    private long calculateSegmentSize(Segment segment) {
+    private long calculateSegmentSize(CatalogSnapshot.Segment segment) {
         long totalSize = 0;
         try {
             for (WriterFileSet writerFileSet : segment.getDFGroupedSearchableFiles().values()) {
@@ -174,9 +172,9 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
         return totalSize;
     }
 
-    public synchronized void addMergingSegment(Collection<Segment> segments) {
+    public synchronized void addMergingSegment(Collection<CatalogSnapshot.Segment> segments) {
         try {
-            for (Segment segment : segments) {
+            for (CatalogSnapshot.Segment segment : segments) {
                 SegmentWrapper wrapper = new SegmentWrapper(segment, calculateSegmentSize(segment));
                 mergingSegments.add(wrapper);
             }
@@ -186,11 +184,11 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
         }
     }
 
-    public synchronized void removeMergingSegment(Collection<Segment> segments) {
+    public synchronized void removeMergingSegment(Collection<CatalogSnapshot.Segment> segments) {
         List<SegmentCommitInfo> segmentToRemove = new ArrayList<>();
         try {
 
-            for (Segment segment : segments) {
+            for (CatalogSnapshot.Segment segment : segments) {
                 SegmentWrapper wrapper = new SegmentWrapper(segment, calculateSegmentSize(segment));
                 segmentToRemove.add(wrapper);
             }
@@ -204,7 +202,7 @@ public class CompositeMergePolicy implements MergePolicy.MergeContext {
     private static class SegmentWrapper extends SegmentCommitInfo {
         private final long totalSizeBytes;
 
-        public SegmentWrapper(Segment segment, long totalSizeBytes) throws IOException {
+        public SegmentWrapper(CatalogSnapshot.Segment segment, long totalSizeBytes) throws IOException {
             super(
                 // SegmentInfo
                 new org.apache.lucene.index.SegmentInfo(

@@ -74,6 +74,7 @@ import org.opensearch.common.lucene.store.ByteArrayIndexInput;
 import org.opensearch.common.lucene.store.InputStreamIndexInput;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Setting.Property;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.AbstractRefCounted;
 import org.opensearch.common.util.concurrent.RefCounted;
@@ -90,15 +91,18 @@ import org.opensearch.env.ShardLock;
 import org.opensearch.env.ShardLockObtainFailedException;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.CombinedDeletionPolicy;
+import org.opensearch.index.engine.DataFormatPlugin;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.exec.FileMetadata;
+import org.opensearch.index.engine.exec.coord.Any;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
-import org.opensearch.index.engine.exec.coord.CompositeEngineCatalogSnapshot;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.AbstractIndexShardComponent;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.translog.Translog;
+import org.opensearch.plugins.PluginsService;
+import org.opensearch.index.engine.exec.DataFormat;
 
 import java.io.Closeable;
 import java.io.EOFException;
@@ -185,7 +189,6 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     private final ShardPath shardPath;
     private final boolean isParentFieldEnabledVersion;
     private final boolean isIndexSortEnabled;
-    private final IndexSettings indexSettings;
 
     // used to ref count files when a new Reader is opened for PIT/Scroll queries
     // prevents segment files deletion until the PIT/Scroll expires or is discarded
@@ -219,8 +222,6 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         CompositeStoreDirectory factoryCreatedCompositeDirectory
     ) {
         super(shardId, indexSettings);
-
-        this.indexSettings = indexSettings;
 
         ShardPath actualShardPath = shardPath != null ? shardPath : createTempShardPath(shardId);
 
@@ -903,7 +904,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
      * @param segmentsGen segment generation number
      * @throws IOException Exception while reading store and building segment infos
      */
-    public SegmentInfos buildSegmentInfosFromSerializedCatalogSnapshot(byte[] infosBytes, long segmentsGen) throws IOException {
+    public SegmentInfos buildSegmentInfos(byte[] infosBytes, long segmentsGen) throws IOException {
         try (final ChecksumIndexInput input = toIndexInput(infosBytes)) {
             return convertCatalogSnapshotToSegmentInfos(infosBytes, segmentsGen);
         } catch (Exception e) {
@@ -913,29 +914,13 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         }
     }
 
-    /**
-     * Segment replication method
-     * <p>
-     * This method takes the segment info bytes to build SegmentInfos. It inc'refs files pointed by passed in SegmentInfos
-     * bytes to ensure they are not deleted.
-     *
-     * @param infosBytes bytes[] of SegmentInfos supposed to be sent over by primary excluding segment_N file
-     * @param segmentsGen segment generation number
-     * @throws IOException Exception while reading store and building segment infos
-     */
-    public SegmentInfos buildSegmentInfos(byte[] infosBytes, long segmentsGen) throws IOException {
-        try (final ChecksumIndexInput input = toIndexInput(infosBytes)) {
-            return SegmentInfos.readCommit(directory, input, segmentsGen);
-        }
-    }
-
     private SegmentInfos convertCatalogSnapshotToSegmentInfos(byte[] catalogSnapshotBytes, long segmentsGen) throws IOException {
         logger.debug("Converting CatalogSnapshot to SegmentInfos for generation: {}", segmentsGen);
 
         // Step 1: Deserialize CatalogSnapshot
         CatalogSnapshot catalogSnapshot;
         try (BytesStreamInput input = new BytesStreamInput(catalogSnapshotBytes)) {
-            catalogSnapshot = new CompositeEngineCatalogSnapshot(input);
+            catalogSnapshot = new CatalogSnapshot(input);
         } catch (Exception e) {
             throw new IOException("Failed to deserialize CatalogSnapshot bytes", e);
         }
@@ -1077,7 +1062,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
      *
      * @opensearch.internal
      */
-    public static class StoreDirectory extends FilterDirectory {
+    static final class StoreDirectory extends FilterDirectory {
         private final Logger deletesLogger;
 
         public final DirectoryFileTransferTracker directoryFileTransferTracker;
@@ -1094,7 +1079,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         }
 
         @Override
-        public void close() throws IOException {
+        public void close() {
             assert false : "Nobody should close this directory except of the Store itself";
         }
 

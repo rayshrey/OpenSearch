@@ -53,8 +53,6 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.UnaryOperator;
 
-import static org.opensearch.index.shard.ShardPath.METADATA_FOLDER_NAME;
-
 /**
  * CompositeRemoteDirectory with direct BlobContainer access per format.
  *
@@ -118,7 +116,7 @@ public class CompositeRemoteDirectory implements Closeable {
         this.pendingDownloadMergedSegments = pendingDownloadMergedSegments;
         this.logger = logger;
 
-        BlobPath metadataBlobPath = baseBlobPath.parent().add(METADATA_FOLDER_NAME);
+        BlobPath metadataBlobPath = Objects.requireNonNull(baseBlobPath.parent()).add("metadata");
         this.metadataBlobContainer = blobStore.blobContainer(metadataBlobPath);
 
         try {
@@ -355,7 +353,7 @@ public class CompositeRemoteDirectory implements Closeable {
                 logger.debug("File {} already exists, using existing container", remoteFileName);
                 return new RemoteIndexOutput(remoteFileName, blobContainer);
             }
-            else if(df !=null && df.equals(METADATA_FOLDER_NAME)) {
+            else if(df !=null && df.equals("TempMetadata")) {
                 return new RemoteIndexOutput(remoteFileName, metadataBlobContainer);
             }
 
@@ -419,7 +417,7 @@ public class CompositeRemoteDirectory implements Closeable {
     public RemoteSegmentMetadata readLatestMetadataFile() throws IOException {
         try {
             List<BlobMetadata> metadataFiles = metadataBlobContainer.listBlobsByPrefixInSortedOrder(
-                METADATA_FOLDER_NAME, 10, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
+                "metadata", 10, BlobContainer.BlobNameSortOrder.LEXICOGRAPHIC);
 
             if (metadataFiles.isEmpty()) {
                 logger.debug("No metadata files found in composite remote directory");

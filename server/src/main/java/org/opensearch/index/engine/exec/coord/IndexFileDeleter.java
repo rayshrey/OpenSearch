@@ -83,9 +83,8 @@ public class IndexFileDeleter {
             Collection<String> dfFiles = new HashSet<>();
             Collection<WriterFileSet> fileSets = snapshot.getSearchableFiles(dataFormat);
             for (WriterFileSet fileSet : fileSets) {
-                Path directory = Path.of(fileSet.getDirectory());
                 for (String file : fileSet.getFiles()) {
-                    dfFiles.add(directory.resolve(file).toAbsolutePath().normalize().toString());
+                    dfFiles.add(fileSet.getDirectory() + "/" + file);
                 }
             }
             dfSegregatedFiles.put(dataFormat, dfFiles);
@@ -101,17 +100,15 @@ public class IndexFileDeleter {
             String dataFormat = entry.getKey();
             Collection<String> referencedFiles = entry.getValue().keySet();
             Collection<String> filesToDelete = new HashSet<>();
-            Path dataFormatPath = shardPath.getDataPath().resolve(dataFormat);
-            if (!Files.exists(dataFormatPath)) continue;
-            try (DirectoryStream<Path> stream = Files.newDirectoryStream(dataFormatPath, "*.parquet")) {
+            // TODO - Currently hardcoding to get all parquet files in data path. Fix this
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(shardPath.getDataPath(), "*.parquet")) {
                 StreamSupport.stream(stream.spliterator(), false)
-                        .map(p -> p.toAbsolutePath().normalize().toString())
+                        .map(Path::toString)
                         .filter((file) -> (!referencedFiles.contains(file)))
                         .forEach(filesToDelete::add);
             }
-            if (!filesToDelete.isEmpty()) {
-                dfFilesToDelete.put(dataFormat, filesToDelete);
-            }
+            filesToDelete = filesToDelete.stream().map(file -> shardPath.getDataPath().resolve(file).toString()).collect(Collectors.toSet());
+            dfFilesToDelete.put(dataFormat, filesToDelete);
         }
         deleteUnreferencedFiles(dfFilesToDelete);
     }

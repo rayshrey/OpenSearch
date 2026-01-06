@@ -21,7 +21,7 @@ import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.indices.recovery.RecoverySettings;
-import org.opensearch.indices.replication.SegmentReplicationSource;
+import org.opensearch.indices.replication.CompositeStoreDirectoryStatsWrapper;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
@@ -43,13 +43,11 @@ public final class RemoteStoreFileDownloader {
     private final Logger logger;
     private final ThreadPool threadPool;
     private final RecoverySettings recoverySettings;
-    private final boolean isOptimizedIndex;
 
-    public RemoteStoreFileDownloader(ShardId shardId, ThreadPool threadPool, RecoverySettings recoverySettings, boolean isOptimizedIndex) {
+    public RemoteStoreFileDownloader(ShardId shardId, ThreadPool threadPool, RecoverySettings recoverySettings) {
         this.logger = Loggers.getLogger(RemoteStoreFileDownloader.class, shardId);
         this.threadPool = threadPool;
         this.recoverySettings = recoverySettings;
-        this.isOptimizedIndex = isOptimizedIndex;
     }
 
     /**
@@ -81,7 +79,7 @@ public final class RemoteStoreFileDownloader {
     public void downloadAsync(
         CancellableThreads cancellableThreads,
         RemoteSegmentStoreDirectory source,
-        SegmentReplicationSource.ReplicationStatsDirectoryWrapper destination,
+        CompositeStoreDirectoryStatsWrapper destination,
         List<FileMetadata> toDownloadFileMetadata,
         ActionListener<Void> listener
     ) {
@@ -160,7 +158,7 @@ public final class RemoteStoreFileDownloader {
     private void downloadInternalFormatAware(
         CancellableThreads cancellableThreads,
         RemoteSegmentStoreDirectory source,
-        SegmentReplicationSource.ReplicationStatsDirectoryWrapper destination,
+        CompositeStoreDirectoryStatsWrapper destination,
         List<FileMetadata> toDownloadFileMetadata,
         Runnable onFileCompletion,
         ActionListener<Void> listener
@@ -224,7 +222,7 @@ public final class RemoteStoreFileDownloader {
     private void copyOneFileFormatAware(
         CancellableThreads cancellableThreads,
         RemoteSegmentStoreDirectory source,
-        SegmentReplicationSource.ReplicationStatsDirectoryWrapper destination,
+        CompositeStoreDirectoryStatsWrapper destination,
         Queue<FileMetadata> queue,
         Runnable onFileCompletion,
         ActionListener<Void> listener
@@ -238,11 +236,11 @@ public final class RemoteStoreFileDownloader {
                 logger.trace("Downloading format-aware file {} with format {}", fileMetadata.file(), fileMetadata.dataFormat());
                 try {
                     cancellableThreads.executeIO(() -> {
-//                        String fileName = fileMetadata.serialize();
                         // Use format-aware copy - CompositeStoreDirectoryStatsWrapper will route based on format
-                        destination.copyFrom(source, fileMetadata.serialize(), fileMetadata.file(), IOContext.DEFAULT);
-                        logger.trace("Downloaded format-aware file {} of format {}",
-                                   fileMetadata.file(), fileMetadata.dataFormat());
+                        destination.copyFrom(fileMetadata, source, IOContext.DEFAULT);
+                        logger.trace("Downloaded format-aware file {} of format {} of size {}",
+                                   fileMetadata.file(), fileMetadata.dataFormat(),
+                                   destination.getDelegate().fileLength(fileMetadata));
                         onFileCompletion.run();
 
                         // TODO: @kamal, Add second destination support for format-aware operations if needed

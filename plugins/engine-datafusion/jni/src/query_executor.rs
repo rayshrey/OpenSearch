@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use datafusion::common::stats::Precision;
 use jni::sys::jlong;
 use datafusion::{
     common::DataFusionError,
@@ -52,7 +51,7 @@ use crate::listing_table::{ListingOptions, ListingTable, ListingTableConfig};
 use crate::partial_agg_optimizer::PartialAggregationOptimizer;
 use crate::executor::DedicatedExecutor;
 use crate::cross_rt_stream::CrossRtStream;
-use crate::{CustomFileMeta, FileStats};
+use crate::CustomFileMeta;
 use crate::DataFusionRuntime;
 use crate::project_row_id_analyzer::ProjectRowIdAnalyzer;
 use crate::absolute_row_id_optimizer::{AbsoluteRowIdOptimizer, ROW_BASE_FIELD_NAME, ROW_ID_FIELD_NAME};

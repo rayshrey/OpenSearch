@@ -9,11 +9,7 @@
 package org.opensearch.index.shard;
 
 import org.apache.logging.log4j.Logger;
-import org.apache.lucene.codecs.CodecUtil;
-import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
-import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.IndexInput;
 import org.opensearch.action.LatchedActionListener;
 import org.opensearch.action.bulk.BackoffPolicy;
 import org.opensearch.cluster.routing.RecoverySource;
@@ -23,7 +19,6 @@ import org.opensearch.common.util.UploadListener;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.engine.InternalEngine;
 import org.opensearch.index.engine.exec.FileMetadata;
-import org.opensearch.index.engine.exec.bridge.Indexer;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.CompositeEngine;
 import org.opensearch.index.remote.RemoteSegmentTransferTracker;
@@ -84,7 +79,7 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     public static final Set<String> EXCLUDE_FILES = Set.of("write.lock");
 
     private final IndexShard indexShard;
-    private final Directory storeDirectory;
+    private final CompositeStoreDirectory compositeStoreDirectory;
     private final RemoteSegmentStoreDirectory remoteDirectory;
     private final RemoteSegmentTransferTracker segmentTracker;
     private final Map<String, String> localSegmentChecksumMap;
@@ -103,10 +98,10 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         super(indexShard.getThreadPool());
         logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.indexShard = indexShard;
-        this.storeDirectory = indexShard.isOptimizedIndex() ? indexShard.store().compositeStoreDirectory() : indexShard.store().directory();
+        this.compositeStoreDirectory = indexShard.store().compositeStoreDirectory();
         this.remoteDirectory = (RemoteSegmentStoreDirectory) ((FilterDirectory) ((FilterDirectory) indexShard.remoteStore().directory())
             .getDelegate()).getDelegate();
-        remoteStoreUploader = new RemoteStoreUploaderService(indexShard, storeDirectory, this.remoteDirectory, indexShard.isOptimizedIndex());
+        remoteStoreUploader = new RemoteStoreUploaderService(indexShard, compositeStoreDirectory, remoteDirectory);
         localSegmentChecksumMap = new HashMap<>();
         RemoteSegmentMetadata remoteSegmentMetadata = null;
         if (indexShard.routingEntry().primary()) {
@@ -245,7 +240,6 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
 
                 CompositeEngine.ReleasableRef<CatalogSnapshot> catalogSnapshotRef = indexShard.getCatalogSnapshotFromEngine();
                 CatalogSnapshot catalogSnapshot = catalogSnapshotRef.getRef();
-
                 final ReplicationCheckpoint checkpoint = indexShard.computeReplicationCheckpoint(catalogSnapshot);
                 if (checkpoint.getPrimaryTerm() != indexShard.getOperationPrimaryTerm()) {
                     throw new IllegalStateException(
@@ -266,13 +260,12 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                 // Log format-aware statistics
                 Map<String, Long> formatCounts = localFilesPostRefresh.stream()
                     .collect(Collectors.groupingBy(
-                        FileMetadata::dataFormat,
+                        fm -> fm.dataFormat(),
                         Collectors.counting()
                     ));
 
-                logger.info("[SEGMENT_UPLOAD_DEBUG] Files to upload: totalFiles={}, formatBreakdown={}, files={}",
-                    localFilesPostRefresh.size(), formatCounts,
-                    localFilesPostRefresh.stream().map(FileMetadata::file).collect(Collectors.toList()));
+                logger.debug("Format-aware segment upload initiated: totalFiles={}, formatBreakdown={}",
+                    localFilesPostRefresh.size(), formatCounts);
 
                 Map<FileMetadata, Long> fileMetadataToSizeMap = updateLocalSizeMapAndTracker(localFilesPostRefresh);
 
@@ -282,8 +275,10 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
                         @Override
                         public void onResponse(Void unused) {
                             try {
+                                logger.debug("New segments upload successful");
                                 // Start metadata file upload
                                 uploadMetadata(localFilesPostRefresh, catalogSnapshot, checkpoint);
+                                logger.debug("Metadata upload successful");
                                 clearStaleFilesFromLocalSegmentChecksumMap(localFilesPostRefresh);
                                 onSuccessfulSegmentsSync(
                                     refreshTimeMs,
@@ -429,10 +424,8 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         updateRemoteRefreshTimeAndSeqNo(refreshTimeMs, refreshClockTimeMs, refreshSeqNo);
         // Reset the backoffDelayIterator for the future failures
         resetBackOffDelayIterator();
-        Indexer indexer = indexShard.getIndexer();
-        if (indexer != null) {
-            indexer.translogManager().setMinSeqNoToKeep(lastRefreshedCheckpoint + 1);
-        }
+        // Set the minimum sequence number for keeping translog
+        indexShard.getIndexer().translogManager().setMinSeqNoToKeep(lastRefreshedCheckpoint + 1);
         // Publishing the new checkpoint which is used for remote store + segrep indexes
         checkpointPublisher.publish(indexShard, checkpoint);
         logger.debug("onSuccessfulSegmentsSync lastRefreshedCheckpoint={} checkpoint={}", lastRefreshedCheckpoint, checkpoint);
@@ -476,25 +469,22 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         return false;
     }
 
+    // ToDo:@Kamal Update MaxSeqNo
     void uploadMetadata(Collection<FileMetadata> localFilesPostRefresh, CatalogSnapshot catalogSnapshot, ReplicationCheckpoint replicationCheckpoint)
         throws IOException {
         final long maxSeqNo = indexShard.getIndexer().currentOngoingRefreshCheckpoint();
 
-        final Map<String, String> segmentUserData = indexShard.store().readLastCommittedSegmentsInfo().getUserData();
-
         CatalogSnapshot catalogSnapshotCloned = catalogSnapshot.cloneNoAcquire();
 
         // Create mutable copy and update checkpoint fields while preserving ALL existing metadata
-        final Map<String, String> userData = new HashMap<>(segmentUserData);
-        userData.put(LOCAL_CHECKPOINT_KEY, String.valueOf(maxSeqNo));
-        userData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(maxSeqNo));
-        catalogSnapshotCloned.setUserData(userData, false);
+        catalogSnapshotCloned.getUserData().put(LOCAL_CHECKPOINT_KEY, String.valueOf(maxSeqNo));
+        catalogSnapshotCloned.getUserData().put(SequenceNumbers.MAX_SEQ_NO, Long.toString(maxSeqNo));
 
         // Log for verification during debugging
         logger.debug("Uploading metadata with userData: translog_uuid={}, history_uuid={}, all_keys={}",
-                   userData.get(Translog.TRANSLOG_UUID_KEY),
-                   userData.get(org.opensearch.index.engine.Engine.HISTORY_UUID_KEY),
-                   userData.keySet());
+                   catalogSnapshotCloned.getUserData().get(Translog.TRANSLOG_UUID_KEY),
+                   catalogSnapshotCloned.getUserData().get(org.opensearch.index.engine.Engine.HISTORY_UUID_KEY),
+                   catalogSnapshotCloned.getUserData().keySet());
 
         Translog.TranslogGeneration translogGeneration = indexShard.getIndexer().translogManager().getTranslogGeneration();
         if (translogGeneration == null) {
@@ -502,18 +492,14 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
         } else {
             long translogFileGeneration = translogGeneration.translogFileGeneration;
             remoteDirectory.uploadMetadata(
-                localFilesPostRefresh.stream().map(this::fromFileMetadata).collect(Collectors.toList()),
+                localFilesPostRefresh.stream().map(FileMetadata::serialize).collect(Collectors.toList()),
                 catalogSnapshotCloned,
-                storeDirectory,
+                compositeStoreDirectory,
                 translogFileGeneration,
                 replicationCheckpoint,
                 indexShard.getNodeId()
             );
         }
-    }
-
-    private String fromFileMetadata(FileMetadata fileMetadata) {
-        return indexShard.isOptimizedIndex() ? fileMetadata.serialize() : fileMetadata.file();
     }
 
     boolean isLowPriorityUpload() {
@@ -540,12 +526,9 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
     }
 
     private String getChecksumOfLocalFile(FileMetadata fileMetadata) throws IOException {
-        if (fileMetadata.dataFormat().equals("lucene")) {
-            return getChecksumOfLocalFile(fileMetadata.file());
-        }
         if (!localSegmentChecksumMap.containsKey(fileMetadata.file())) {
             try{
-                String checksum = Long.toString(((CompositeStoreDirectory) storeDirectory).calculateChecksum(fileMetadata));
+                String checksum = Long.toString(compositeStoreDirectory.calculateChecksum(fileMetadata));
                 localSegmentChecksumMap.put(fileMetadata.file(), checksum);
                 logger.debug("Calculated checksum for file: {}, format: {}, checksum: {}",
                             fileMetadata.file(), fileMetadata.dataFormat(), checksum);
@@ -557,16 +540,6 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
             }
         }
         return localSegmentChecksumMap.get(fileMetadata.file());
-    }
-
-    private String getChecksumOfLocalFile(String file) throws IOException {
-        if (!localSegmentChecksumMap.containsKey(file)) {
-            try (IndexInput indexInput = storeDirectory.openInput(file, IOContext.READONCE)) {
-                String checksum = Long.toString(CodecUtil.retrieveChecksum(indexInput));
-                localSegmentChecksumMap.put(file, checksum);
-            }
-        }
-        return localSegmentChecksumMap.get(file);
     }
 
     /**
@@ -588,10 +561,10 @@ public final class RemoteStoreRefreshListener extends ReleasableRetryableRefresh
      */
     private Map<FileMetadata, Long> updateLocalSizeMapAndTracker(Collection<FileMetadata> localFilesPostRefresh) {
         Map<FileMetadata, Long> fileSizeMap = new HashMap<>();
+
         for (FileMetadata fileMetadata : localFilesPostRefresh) {
             try {
-                String stringForFileLength = fileMetadata.dataFormat().equals("lucene") ? fileMetadata.file() : fileMetadata.serialize();
-                long fileSize = storeDirectory.fileLength(stringForFileLength);
+                long fileSize = compositeStoreDirectory.fileLength(fileMetadata);
                 fileSizeMap.put(fileMetadata, fileSize);
             } catch (IOException e) {
                 logger.warn("Failed to get file length for file: {}, format: {}",

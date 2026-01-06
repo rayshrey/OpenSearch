@@ -93,7 +93,7 @@ public class RemoteStoreUploaderServiceTests extends OpenSearchTestCase {
 
         when(mockUploadListenerFunction.apply(any())).thenReturn(mockUploadListener);
 
-        uploaderService = new RemoteStoreUploaderService(mockIndexShard, mockStoreDirectory, mockRemoteDirectory, false);
+        uploaderService = new RemoteStoreUploaderService(mockIndexShard, mockStoreDirectory, mockRemoteDirectory);
     }
 
     /**
@@ -187,8 +187,8 @@ public class RemoteStoreUploaderServiceTests extends OpenSearchTestCase {
         RemoteStoreUploaderService testUploaderService = new RemoteStoreUploaderService(
             freshMockShard,
             mockCompositeStoreDirectory,
-            remoteSegmentStoreDirectory,
-            false);
+            remoteSegmentStoreDirectory
+        );
 
         doAnswer(invocation -> {
             ActionListener<Void> callback = invocation.getArgument(3);
@@ -250,8 +250,8 @@ public class RemoteStoreUploaderServiceTests extends OpenSearchTestCase {
         RemoteStoreUploaderService testUploaderService = new RemoteStoreUploaderService(
             freshMockShard,
             mockCompositeStoreDirectory,
-            remoteSegmentStoreDirectory,
-            false);
+            remoteSegmentStoreDirectory
+        );
 
         doAnswer(invocation -> {
             ActionListener<Void> callback = invocation.getArgument(3);
@@ -314,8 +314,8 @@ public class RemoteStoreUploaderServiceTests extends OpenSearchTestCase {
         RemoteStoreUploaderService testUploaderService = new RemoteStoreUploaderService(
             freshMockShard,
             mockCompositeStoreDirectory,
-            remoteSegmentStoreDirectory,
-            false);
+            remoteSegmentStoreDirectory
+        );
 
         // Setup the real RemoteSegmentStoreDirectory to handle copyFrom calls
         doAnswer(invocation -> {
@@ -377,8 +377,8 @@ public class RemoteStoreUploaderServiceTests extends OpenSearchTestCase {
         RemoteStoreUploaderService testUploaderService = new RemoteStoreUploaderService(
             freshMockShard,
             mockCompositeStoreDirectory,
-            remoteSegmentStoreDirectory,
-            false);
+            remoteSegmentStoreDirectory
+        );
 
         CorruptIndexException corruptException = new CorruptIndexException("Index corrupted", "test");
         CountDownLatch latch = new CountDownLatch(1);
@@ -441,8 +441,8 @@ public class RemoteStoreUploaderServiceTests extends OpenSearchTestCase {
         RemoteStoreUploaderService testUploaderService = new RemoteStoreUploaderService(
             freshMockShard,
             mockCompositeStoreDirectory,
-            remoteSegmentStoreDirectory,
-            false);
+            remoteSegmentStoreDirectory
+        );
 
         RuntimeException genericException = new RuntimeException("Generic error");
         CountDownLatch latch = new CountDownLatch(1);

@@ -12,6 +12,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
 import org.opensearch.action.support.GroupedActionListener;
 import org.opensearch.common.logging.Loggers;
@@ -19,6 +20,7 @@ import org.opensearch.common.util.UploadListener;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.engine.exec.FileMetadata;
 import org.opensearch.index.store.SegmentUploadFailedException;
+import org.opensearch.index.store.CompositeStoreDirectory;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
 
 import java.util.Collection;
@@ -35,16 +37,22 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
     private final Logger logger;
 
     private final IndexShard indexShard;
-    private final Directory storeDirectory;
+    private final CompositeStoreDirectory storeDirectory;
     private final RemoteSegmentStoreDirectory remoteDirectory;
-    private final boolean isOptimizedIndex;
 
-    public RemoteStoreUploaderService(IndexShard indexShard, Directory storeDirectory, RemoteSegmentStoreDirectory remoteDirectory, boolean isOptimizedIndex) {
+    // Todo: Remove
+    public RemoteStoreUploaderService(IndexShard indexShard, Directory storeDirectory, RemoteSegmentStoreDirectory remoteDirectory) {
+        logger = Loggers.getLogger(getClass(), indexShard.shardId());
+        this.indexShard = indexShard;
+        this.storeDirectory =  null;
+        this.remoteDirectory = remoteDirectory;
+    }
+
+    public RemoteStoreUploaderService(IndexShard indexShard, CompositeStoreDirectory storeDirectory, RemoteSegmentStoreDirectory remoteDirectory) {
         logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.indexShard = indexShard;
         this.storeDirectory =  storeDirectory;
         this.remoteDirectory = remoteDirectory;
-        this.isOptimizedIndex = isOptimizedIndex;
     }
 
     @Override
@@ -78,6 +86,8 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
                     fileMetadataCollection.size(), formatCounts, formatSizes);
         ActionListener<Collection<Void>> mappedListener = ActionListener.map(listener, resp -> null);
         GroupedActionListener<Void> batchUploadListener = new GroupedActionListener<>(mappedListener, fileMetadataCollection.size());
+
+        CompositeStoreDirectory directory = storeDirectory;
 
         for (FileMetadata fileMetadata : fileMetadataCollection) {
             String fileName = fileMetadata.file();
@@ -113,13 +123,7 @@ public class RemoteStoreUploaderService implements RemoteStoreUploader {
                 batchUploadListener.onFailure(ex);
             });
             statsListener.beforeUpload(fileMetadata);
-            remoteDirectory.copyFrom(
-                storeDirectory,
-                isOptimizedIndex ? fileMetadata.serialize() : fileMetadata.file(),
-                IOContext.DEFAULT,
-                aggregatedListener,
-                isLowPriorityUpload
-            );
+            remoteDirectory.copyFrom(storeDirectory, fileMetadata.serialize(), IOContext.DEFAULT, aggregatedListener, isLowPriorityUpload);
         }
     }
 }

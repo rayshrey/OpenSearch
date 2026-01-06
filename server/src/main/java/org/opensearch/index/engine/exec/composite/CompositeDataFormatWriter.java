@@ -152,10 +152,6 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
         throw new UnsupportedOperationException();
     }
 
-    public long getWriterGeneration() {
-        return writerGeneration;
-    }
-
     public static class CompositeDocumentInput implements DocumentInput<List<? extends DocumentInput<?>>> {
 
         List<? extends DocumentInput<?>> inputs;

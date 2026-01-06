@@ -8,8 +8,6 @@
 
 package org.opensearch.index.engine.exec.merge;
 
-import org.opensearch.index.engine.exec.coord.Segment;
-
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.common.logging.Loggers;
@@ -52,12 +50,12 @@ public class CompositeMergeHandler extends MergeHandler {
         try (CompositeEngine.ReleasableRef<CatalogSnapshot> catalogSnapshotReleasableRef = compositeEngine.acquireSnapshot()) {
             CatalogSnapshot catalogSnapshot = catalogSnapshotReleasableRef.getRef();
 
-            List<Segment> segmentList = catalogSnapshot.getSegments();
-            List<List<Segment>> mergeCandidates =
+            List<CatalogSnapshot.Segment> segmentList = catalogSnapshot.getSegments();
+            List<List<CatalogSnapshot.Segment>> mergeCandidates =
                 mergePolicy.findForceMergeCandidates(segmentList, maxSegmentCount);
 
             // Process merge candidates
-            for (List<Segment> mergeGroup : mergeCandidates) {
+            for (List<CatalogSnapshot.Segment> mergeGroup : mergeCandidates) {
                 oneMerges.add(new OneMerge(mergeGroup));
             }
         } catch (Exception e) {
@@ -73,12 +71,12 @@ public class CompositeMergeHandler extends MergeHandler {
         try (CompositeEngine.ReleasableRef<CatalogSnapshot> catalogSnapshotReleasableRef = compositeEngine.acquireSnapshot()) {
             CatalogSnapshot catalogSnapshot = catalogSnapshotReleasableRef.getRef();
 
-            List<Segment> segmentList = catalogSnapshot.getSegments();
-            List<List<Segment>> mergeCandidates =
+            List<CatalogSnapshot.Segment> segmentList = catalogSnapshot.getSegments();
+            List<List<CatalogSnapshot.Segment>> mergeCandidates =
                 mergePolicy.findMergeCandidates(segmentList);
 
             // Process merge candidates
-            for (List<Segment> mergeGroup : mergeCandidates) {
+            for (List<CatalogSnapshot.Segment> mergeGroup : mergeCandidates) {
                 oneMerges.add(new OneMerge(mergeGroup));
             }
         } catch (Exception e) {
