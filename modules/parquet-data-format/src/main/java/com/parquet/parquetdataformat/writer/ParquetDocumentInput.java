@@ -3,6 +3,8 @@ package com.parquet.parquetdataformat.writer;
 import com.parquet.parquetdataformat.fields.ArrowFieldRegistry;
 import com.parquet.parquetdataformat.fields.ParquetField;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.opensearch.index.engine.exec.DocumentInput;
 import org.opensearch.index.engine.exec.WriteResult;
 import org.opensearch.index.engine.exec.composite.CompositeDataFormatWriter;
@@ -52,10 +54,27 @@ public class ParquetDocumentInput implements DocumentInput<ManagedVSR> {
 
         if (parquetField == null) {
             throw new IllegalArgumentException(
-                String.format("Unsupported field type: %s. Field type is not registered in ArrowFieldRegistry.", fieldTypeName)
+                String.format("Unsupported field type: %s", fieldTypeName)
             );
         }
 
+        FieldVector vector = managedVSR.getVector(fieldType.name());
+        
+        if (vector == null) {
+            System.out.println("Reaching dynamic mapping condition ....");
+            // NEW FIELD - create and add it dynamically
+            //vector = parquetField.createFieldVector(fieldType, managedVSR.getAllocator());
+            try {
+                Field field = new Field(fieldType.name(), parquetField.getFieldType(), null);
+                vector = field.createVector(managedVSR.getAllocator());
+                managedVSR.addFieldVector(field, vector);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+        }
+
+        // Populate the field in vector
         parquetField.createField(fieldType, managedVSR, value);
     }
 

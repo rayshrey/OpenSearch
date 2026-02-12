@@ -14,6 +14,7 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 
 import static com.parquet.parquetdataformat.engine.ParquetDataFormat.PARQUET_DATA_FORMAT;
 
@@ -41,13 +42,11 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     private static final Logger logger = LogManager.getLogger(ParquetWriter.class);
 
     private final String file;
-    private final Schema schema;
     private final VSRManager vsrManager;
     private final long writerGeneration;
 
     public ParquetWriter(String file, Schema schema, long writerGeneration, ArrowBufferPool arrowBufferPool) {
         this.file = file;
-        this.schema = schema;
         this.vsrManager = new VSRManager(file, schema, arrowBufferPool);
         this.writerGeneration = writerGeneration;
     }
@@ -65,12 +64,21 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
             return FileInfos.empty();
         }
         Path filePath = Path.of(file);
-        WriterFileSet writerFileSet = WriterFileSet.builder()
+        WriterFileSet.Builder builder = WriterFileSet.builder()
             .directory(filePath.getParent())
-            .writerGeneration(writerGeneration)
-            .addFile(filePath.getFileName().toString())
-            .addNumRows(parquetFileMetadata.numRows())
-            .build();
+            .writerGeneration(writerGeneration);
+        
+        // Add all files created (including rotated ones)
+        List<ParquetFileMetadata> allFiles = vsrManager.getAllCreatedFiles();
+        long totalRows = 0;
+        for (ParquetFileMetadata metadata : allFiles) {
+            builder.addFile(Path.of(metadata.filePath()).getFileName().toString());
+            totalRows += metadata.numRows();
+        }
+        
+        builder.addNumRows(totalRows);
+        WriterFileSet writerFileSet = builder.build();
+        
         return FileInfos.builder().putWriterFileSet(PARQUET_DATA_FORMAT, writerFileSet).build();
     }
 

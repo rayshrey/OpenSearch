@@ -25,10 +25,12 @@ public class ManagedVSR implements AutoCloseable {
     private static final Logger logger = LogManager.getLogger(ManagedVSR.class);
 
     private final String id;
-    private final VectorSchemaRoot vsr;
+    private VectorSchemaRoot vsr;
     private final BufferAllocator allocator;
     private VSRState state;
     private final Map<String, Field> fields = new HashMap<>();
+    private int schemaVersion = 0;
+    private SchemaChangeListener schemaChangeListener;
 
 
     public ManagedVSR(String id, Schema schema, BufferAllocator allocator) {
@@ -80,6 +82,40 @@ public class ManagedVSR implements AutoCloseable {
     }
 
     /**
+     * Adds a new field vector to this VSR dynamically.
+     * Only allowed when VSR is in ACTIVE state.
+     *
+     * @param field Field definition
+     * @param vector FieldVector for the field
+     * @throws IllegalStateException if VSR is not ACTIVE
+     */
+    public void addFieldVector(Field field, FieldVector vector) {
+        if (state != VSRState.ACTIVE) {
+            throw new IllegalStateException("Cannot add field to VSR in state: " + state);
+        }
+        if (schemaChangeListener != null) {
+            boolean rotated = schemaChangeListener.preSchemaChange();
+            if (rotated) {
+                vsr.clear();
+            }
+            logger.info("preSchemaListener hit, result - {} ", rotated);
+        } else {
+            logger.info("schemaChangeListener is null ");
+        }
+        vsr = vsr.addVector(vsr.getFieldVectors().size()-1, vector);
+        fields.put(field.getName(), field);
+        vsr.syncSchema();
+        schemaVersion++;
+        if (schemaChangeListener != null) {
+            boolean rotated = schemaChangeListener.postSchemaChange(vsr.getSchema());
+            logger.info("postSchemaListener hit, result - {}", rotated);
+        } else {
+            logger.info("schemaChangeListener is null ");
+        }
+        logger.debug("Added field {} to VSR {}", field.getName(), id);
+    }
+
+    /**
      * Changes the state of this VSR.
      * Handles state transition logic and immutability.
      * This method is private to ensure controlled state transitions.
@@ -125,7 +161,7 @@ public class ManagedVSR implements AutoCloseable {
             vsr.close();
         }
         if (allocator != null) {
-            allocator.close();
+            //allocator.close();
         }
     }
 
@@ -136,6 +172,38 @@ public class ManagedVSR implements AutoCloseable {
      */
     public VSRState getState() {
         return state;
+    }
+
+    /**
+     * Gets the current schema of this VSR.
+     * Schema may change as fields are added dynamically.
+     *
+     * @return Current schema
+     */
+    public Schema getSchema() {
+        return vsr.getSchema();
+    }
+
+    /**
+     * Sets the schema change listener.
+     *
+     * @param listener SchemaChangeListener to notify on schema changes
+     */
+    public void setSchemaChangeListener(SchemaChangeListener listener) {
+        this.schemaChangeListener = listener;
+    }
+
+    public boolean isSchemaChangeListenerSet() {
+        return  schemaChangeListener != null;
+    }
+
+    /**
+     * Gets the current schema version.
+     *
+     * @return Schema version number
+     */
+    public int getSchemaVersion() {
+        return schemaVersion;
     }
 
     /**

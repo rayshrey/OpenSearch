@@ -21,7 +21,7 @@ public class VSRPool implements AutoCloseable {
 
     private static final Logger logger = LogManager.getLogger(VSRPool.class);
 
-    private final Schema schema;
+    private Schema schema;
     private final ArrowBufferPool bufferPool;
     private final String poolId;
 
@@ -42,7 +42,7 @@ public class VSRPool implements AutoCloseable {
         this.vsrCounter = new AtomicInteger(0);
 
         // Configuration - could be made configurable
-        this.maxRowsPerVSR = 50000; // Max rows before forcing freeze
+        this.maxRowsPerVSR = 5; // Max rows before forcing freeze
 
         // Initialize with first active VSR
         initializeActiveVSR();
@@ -177,6 +177,17 @@ public class VSRPool implements AutoCloseable {
         if (current != null && current.getRowCount() > 0) {
             freezeVSR(current);
         }
+    }
+
+    /**
+     * Updates the schema for new VSRs.
+     * Called when schema evolves (new fields added).
+     *
+     * @param newSchema New schema to use for future VSRs
+     */
+    public void updateSchema(Schema newSchema) {
+        this.schema = newSchema;
+        logger.debug("Schema updated in VSRPool {}", poolId);
     }
 
     /**

@@ -235,7 +235,7 @@ impl NativeParquetWriter {
         Ok(file_metadata)
     }
 
-    fn create_java_metadata<'local>(env: &mut JNIEnv<'local>, metadata: &FormatFileMetaData) -> Result<JObject<'local>, Box<dyn std::error::Error>> {
+    fn create_java_metadata<'local>(env: &mut JNIEnv<'local>, metadata: &FormatFileMetaData, filename: &str) -> Result<JObject<'local>, Box<dyn std::error::Error>> {
         // Find the ParquetFileMetadata class
         let class = env.find_class("com/parquet/parquetdataformat/bridge/ParquetFileMetadata")?;
 
@@ -245,17 +245,20 @@ impl NativeParquetWriter {
             None => JObject::null().into(),
         };
 
+        let file_path_jstring = env.new_string(filename)?;
+
         // Create the Java object using new_object with signature
-        let java_metadata = env.new_object(&class, "(IJLjava/lang/String;)V", &[
+        let java_metadata = env.new_object(&class, "(IJLjava/lang/String;Ljava/lang/String;)V", &[
             (metadata.version).into(),
             (metadata.num_rows).into(),
             (&created_by_jstring).into(),
+            (&file_path_jstring).into(),
         ])?;
 
         Ok(java_metadata)
     }
 
-    fn create_java_metadata_from_file<'local>(env: &mut JNIEnv<'local>, metadata: &FileFileMetaData) -> Result<JObject<'local>, Box<dyn std::error::Error>> {
+    fn create_java_metadata_from_file<'local>(env: &mut JNIEnv<'local>, metadata: &FileFileMetaData, filename: &str) -> Result<JObject<'local>, Box<dyn std::error::Error>> {
         // Find the ParquetFileMetadata class
         let class = env.find_class("com/parquet/parquetdataformat/bridge/ParquetFileMetadata")?;
 
@@ -265,11 +268,14 @@ impl NativeParquetWriter {
             None => JObject::null().into(),
         };
 
+        let file_path_jstring = env.new_string(filename)?;
+
         // Create the Java object using new_object with signature
-        let java_metadata = env.new_object(&class, "(IJLjava/lang/String;)V", &[
+        let java_metadata = env.new_object(&class, "(IJLjava/lang/String;Ljava/lang/String;)V", &[
             (metadata.version()).into(),
             (metadata.num_rows()).into(),
             (&created_by_jstring).into(),
+            (&file_path_jstring).into(),
         ])?;
 
         Ok(java_metadata)
@@ -321,11 +327,11 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
     file: JString
 ) -> jobject {
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
-    match NativeParquetWriter::close_writer(filename) {
+    match NativeParquetWriter::close_writer(filename.clone()) {
         Ok(maybe_metadata) => {
             match maybe_metadata {
                 Some(metadata) => {
-                    match NativeParquetWriter::create_java_metadata(&mut env, &metadata) {
+                    match NativeParquetWriter::create_java_metadata(&mut env, &metadata, &filename) {
                         Ok(java_obj) => java_obj.into_raw(),
                         Err(e) => {
                             let error_msg = format!("[RUST] ERROR: Failed to create Java metadata object: {:?}\n", e);
@@ -372,9 +378,9 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_getF
     file: JString
 ) -> jobject {
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
-    match NativeParquetWriter::get_file_metadata(filename) {
+    match NativeParquetWriter::get_file_metadata(filename.clone()) {
         Ok(metadata) => {
-            match NativeParquetWriter::create_java_metadata_from_file(&mut env, &metadata) {
+            match NativeParquetWriter::create_java_metadata_from_file(&mut env, &metadata, &filename) {
                 Ok(java_obj) => java_obj.into_raw(),
                 Err(e) => {
                     let error_msg = format!("[RUST] ERROR: Failed to create Java metadata object: {:?}\n", e);

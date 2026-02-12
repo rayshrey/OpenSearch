@@ -13,6 +13,8 @@ import com.parquet.parquetdataformat.bridge.NativeParquetWriter;
 import com.parquet.parquetdataformat.bridge.ParquetFileMetadata;
 import com.parquet.parquetdataformat.memory.ArrowBufferPool;
 import com.parquet.parquetdataformat.writer.ParquetDocumentInput;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -20,6 +22,7 @@ import org.opensearch.index.engine.exec.FlushIn;
 import org.opensearch.index.engine.exec.WriteResult;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -38,7 +41,7 @@ public class VSRManager implements AutoCloseable {
     private static final Logger logger = LogManager.getLogger(VSRManager.class);
 
     private final AtomicReference<ManagedVSR> managedVSR = new AtomicReference<>();
-    private final Schema schema;
+    private Schema schema;
     private final String fileName;
     private final VSRPool vsrPool;
     private NativeParquetWriter writer;
@@ -54,18 +57,9 @@ public class VSRManager implements AutoCloseable {
         // Get active VSR from pool
         this.managedVSR.set(vsrPool.getActiveVSR());
 
-        // Initialize writer lazily to avoid crashes
-        initializeWriter();
-    }
-
-    private void initializeWriter() {
-        try {
-            try (ArrowExport export = managedVSR.get().exportSchema()) {
-                writer = new NativeParquetWriter(fileName, export.getSchemaAddress());
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to initialize Parquet writer: " + e.getMessage(), e);
-        }
+        // Set schema change listener
+        setSchemaChangeListener(managedVSR.get());
+        writer = new NativeParquetWriter(fileName);
     }
 
     public WriteResult addToManagedVSR(ParquetDocumentInput document) throws IOException {
@@ -120,8 +114,13 @@ public class VSRManager implements AutoCloseable {
             ParquetFileMetadata metadata;
 
             // Write through native writer handle
-            try (ArrowExport export = currentVSR.exportToArrow()) {
-                writer.write(export.getArrayAddress(), export.getSchemaAddress());
+            try (ArrowExport export = currentVSR.exportToArrow();
+                 ArrowExport schemaExport = currentVSR.exportSchema()) {
+                if (!writer.isWriterInitialized()) {
+                    writer.write(export.getArrayAddress(), export.getSchemaAddress(), schemaExport.getSchemaAddress());
+                } else {
+                    writer.write(export.getArrayAddress(), export.getSchemaAddress());
+                }
                 writer.close();
                 metadata = writer.getMetadata();
             }
@@ -182,6 +181,9 @@ public class VSRManager implements AutoCloseable {
             boolean rotated = vsrPool.maybeRotateActiveVSR();
 
             if (rotated) {
+                if (managedVSR.get() !=null && managedVSR.get().isSchemaChangeListenerSet() == false)
+                    setSchemaChangeListener(managedVSR.get());
+
                 logger.debug("VSR rotation occurred after document addition for {}", fileName);
 
                 // Get the frozen VSR that was just created by rotation
@@ -191,8 +193,14 @@ public class VSRManager implements AutoCloseable {
                         frozenVSR.getId(), frozenVSR.getRowCount(), fileName);
 
                     // Write the frozen VSR data immediately
-                    try (ArrowExport export = frozenVSR.exportToArrow()) {
-                        writer.write(export.getArrayAddress(), export.getSchemaAddress());
+                    try (ArrowExport export = frozenVSR.exportToArrow();
+                         ArrowExport schemaExport = frozenVSR.exportSchema()) {
+                        if (!writer.isWriterInitialized()) {
+                            writer.write(export.getArrayAddress(), export.getSchemaAddress(), schemaExport.getSchemaAddress());
+                        } else {
+                            writer.write(export.getArrayAddress(), export.getSchemaAddress());
+                        }
+                        writer.rotateActiveParquetFile();
                     }
 
                     logger.debug("Successfully wrote frozen VSR data for {}", fileName);
@@ -262,11 +270,89 @@ public class VSRManager implements AutoCloseable {
     }
 
     /**
+     * Adds a new field to the current schema and VSR.
+     *
+     * @param field Field definition
+     * @param fieldVector FieldVector for the field
+     * @throws IOException if VSR is not active
+     */
+    public void addField(Field field, FieldVector fieldVector) throws IOException {
+        ManagedVSR currentVSR = managedVSR.get();
+        if (currentVSR == null || currentVSR.getState() != VSRState.ACTIVE) {
+            throw new IOException("Cannot add field - VSR is not active");
+        }
+        currentVSR.addFieldVector(field, fieldVector);
+        this.schema = currentVSR.getSchema();
+        vsrPool.updateSchema(this.schema);
+        logger.debug("Added field {} to VSRManager for {}", field.getName(), fileName);
+    }
+
+    /**
+     * Gets the current schema (may have evolved).
+     *
+     * @return Current schema
+     */
+    public Schema getCurrentSchema() {
+        return schema;
+    }
+
+    /**
      * Gets the current frozen VSR for testing purposes.
      *
      * @return The current frozen VSR instance, or null if none exists
      */
     public ManagedVSR getFrozenVSR() {
         return vsrPool.getFrozenVSR();
+    }
+
+    /**
+     * Rotates the writer to a new file with evolved schema.
+     *
+     * @param newSchema The new evolved schema
+     */
+    private boolean persistSchemaChange(Schema newSchema) {
+        this.schema = newSchema;
+        return true;
+    }
+
+    private boolean flushAndRotateWriter() throws IOException {
+        ManagedVSR currentVSR = managedVSR.get();
+        if (writer.isWriterInitialized()) {
+            try (ArrowExport export = currentVSR.exportToArrow()) {
+                writer.write(export.getArrayAddress(), export.getSchemaAddress());
+                writer.rotateActiveParquetFile();
+                logger.info("Rotated writer for schema change");
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Gets all files created by this manager (including rotated ones).
+     *
+     * @return List of all ParquetFileMetadata for created files
+     */
+    public List<ParquetFileMetadata> getAllCreatedFiles() {
+        return writer.getAllClosedFilesMetadata();
+    }
+
+    private void setSchemaChangeListener(ManagedVSR managedVSR) {
+        managedVSR.setSchemaChangeListener(new SchemaChangeListener() {
+            @Override
+            public boolean preSchemaChange() {
+                try {
+                    return flushAndRotateWriter();
+                } catch (IOException e) {
+                    logger.error("Failed to rotate writer on schema change: {}", e.getMessage(), e);
+                    return  false;
+                }
+            }
+
+            @Override
+            public boolean postSchemaChange(Schema newSchema) {
+                return persistSchemaChange(newSchema);
+            }
+        });
     }
 }
