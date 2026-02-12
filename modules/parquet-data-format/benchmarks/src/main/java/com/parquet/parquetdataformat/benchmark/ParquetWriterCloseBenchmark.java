@@ -37,8 +37,8 @@ import java.util.concurrent.TimeUnit;
  * This benchmark focuses specifically on measuring the overhead of creating writers.
  */
 @Fork(1)
-@Warmup(iterations = 1, time = 10, timeUnit = TimeUnit.SECONDS)
-@Measurement(iterations = 5, time = 10, timeUnit = TimeUnit.SECONDS)
+@Warmup(iterations = 0, time = 10, timeUnit = TimeUnit.SECONDS)
+@Measurement(iterations = 0, time = 10, timeUnit = TimeUnit.SECONDS)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @State(Scope.Benchmark)
