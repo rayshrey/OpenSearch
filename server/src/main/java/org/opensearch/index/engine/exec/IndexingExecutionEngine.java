@@ -37,4 +37,6 @@ public interface IndexingExecutionEngine<T extends DataFormat> extends Closeable
     }
 
     void deleteFiles(Map<String, Collection<String>> filesToDelete) throws IOException;
+
+    DocumentInput<?> newDocumentInput();
 }

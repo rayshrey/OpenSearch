@@ -17,6 +17,7 @@ import org.opensearch.index.engine.exec.RowIdGenerator;
 import org.opensearch.index.engine.exec.WriteResult;
 import org.opensearch.index.engine.exec.Writer;
 import org.opensearch.index.engine.exec.WriterFileSet;
+import org.opensearch.index.engine.exec.WriterProvider;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.SeqNoFieldMapper;
 import org.opensearch.index.mapper.VersionFieldMapper;
@@ -33,7 +34,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
-public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWriter.CompositeDocumentInput>, Lock {
+public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWriter.CompositeDocumentInput>, Lock, WriterProvider {
 
     private final List<Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>>> writers;
     private final Runnable postWrite;
@@ -41,15 +42,17 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
     private final SetOnce<Boolean> flushPending = new SetOnce<>();
     private final SetOnce<Boolean> hasFlushed = new SetOnce<>();
     private final long writerGeneration;
+    private final long mappingVersion;
     private boolean aborted;
     private final RowIdGenerator rowIdGenerator;
     public static final String ROW_ID = "___row_id";
 
-    public CompositeDataFormatWriter(CompositeIndexingExecutionEngine engine, long writerGeneration) {
+    public CompositeDataFormatWriter(CompositeIndexingExecutionEngine engine, long writerGeneration, long mappingVersion) {
         this.writers = new ArrayList<>();
         this.lock = new ReentrantLock();
         this.aborted = false;
         this.writerGeneration = writerGeneration;
+        this.mappingVersion = mappingVersion;
         engine.getDelegates().forEach(delegate -> {
             try {
                 writers.add(new AbstractMap.SimpleImmutableEntry<>(delegate.getDataFormat(), delegate.createWriter(writerGeneration)));
@@ -65,7 +68,7 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
 
     @Override
     public WriteResult addDoc(CompositeDocumentInput d) throws IOException {
-        return d.addToWriter();
+        return d.addToWriter(this);
     }
 
     @Override
@@ -84,6 +87,10 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
 
     }
 
+    public void performPostWrite() {
+        postWrite.run();
+    }
+
     @Override
     public void close() {
         for (Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>> writerPair : writers) {
@@ -92,18 +99,12 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
     }
 
     @Override
-    public CompositeDocumentInput newDocumentInput() {
-
-        CompositeDocumentInput compositeDocumentInput =
-            new CompositeDocumentInput(
-                writers.stream().map(Map.Entry::getValue).map(Writer::newDocumentInput).collect(Collectors.toList()),
-                this,
-                postWrite
-            );
-
-        compositeDocumentInput.addRowIdField(ROW_ID, rowIdGenerator.getAndIncrementRowId());
-
-        return compositeDocumentInput;
+    public Writer<?> getWriter(String dataFormatName) {
+        return writers.stream()
+            .filter(entry -> entry.getKey().name().equals(dataFormatName))
+            .map(Map.Entry::getValue)
+            .findFirst()
+            .orElse(null);
     }
 
     void abort() throws IOException {
@@ -156,18 +157,28 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
         return writerGeneration;
     }
 
+    public long getMappingVersion() {
+        return mappingVersion;
+    }
+
+    public List<Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>>> getWriters() {
+        return writers;
+    }
+
+    public RowIdGenerator getRowIdGenerator() {
+        return rowIdGenerator;
+    }
+
     public static class CompositeDocumentInput implements DocumentInput<List<? extends DocumentInput<?>>> {
 
         List<? extends DocumentInput<?>> inputs;
-        CompositeDataFormatWriter writer;
         Runnable onClose;
         private long version = -1;
         private long seqNo = -2L;
         private long primaryTerm = 0;
 
-        public CompositeDocumentInput(List<? extends DocumentInput<?>> inputs, CompositeDataFormatWriter writer, Runnable onClose) {
+        public CompositeDocumentInput(List<? extends DocumentInput<?>> inputs, Runnable onClose) {
             this.inputs = inputs;
-            this.writer = writer;
             this.onClose = onClose;
         }
 
@@ -211,10 +222,10 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
         }
 
         @Override
-        public WriteResult addToWriter() throws IOException {
+        public WriteResult addToWriter(WriterProvider writerProvider) throws IOException {
             WriteResult writeResult = null;
             for (DocumentInput<?> input : inputs) {
-                writeResult = input.addToWriter();
+                writeResult = input.addToWriter(writerProvider);
             }
             return writeResult;
         }

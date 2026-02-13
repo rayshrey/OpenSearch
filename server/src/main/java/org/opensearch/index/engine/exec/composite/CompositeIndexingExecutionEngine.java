@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.DocumentInput;
 import org.opensearch.index.engine.exec.FileInfos;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
 import org.opensearch.index.engine.exec.Merger;
@@ -44,6 +45,7 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
     private final Any dataFormat;
     private final AtomicLong writerGeneration;
     private final List<IndexingExecutionEngine<?>> delegates = new ArrayList<>();
+    private final MapperService mapperService;
 
     public CompositeIndexingExecutionEngine(
         MapperService mapperService,
@@ -51,6 +53,7 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
         ShardPath shardPath,
         long initialWriterGeneration
     ) {
+        this.mapperService = mapperService;
         this.writerGeneration = new AtomicLong(initialWriterGeneration);
         List<DataFormat> dataFormats = new ArrayList<>();
         try {
@@ -66,7 +69,7 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
         this.dataFormat = new Any(dataFormats, dataFormats.getFirst());
         this.dataFormatWriterPool =
             new CompositeDataFormatWriterPool(
-                () -> new CompositeDataFormatWriter(this, writerGeneration.getAndIncrement()),
+                (mappingVersion) -> new CompositeDataFormatWriter(this, writerGeneration.getAndIncrement(), mappingVersion),
                 LinkedList::new,
                 Runtime.getRuntime().availableProcessors()
             );
@@ -75,6 +78,10 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
     @Override
     public Any getDataFormat() {
         return dataFormat;
+    }
+
+    public MapperService getMapperService() {
+        return mapperService;
     }
 
     public long getNextWriterGeneration() {
@@ -127,8 +134,16 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
         throw new UnsupportedOperationException();
     }
 
-    public Writer<CompositeDataFormatWriter.CompositeDocumentInput> createCompositeWriter() {
-        return dataFormatWriterPool.getAndLock();
+    public Writer<CompositeDataFormatWriter.CompositeDocumentInput> createCompositeWriter(long mappingVersion) {
+        return dataFormatWriterPool.getAndLock(mappingVersion);
+    }
+
+    public CompositeDataFormatWriter.CompositeDocumentInput newDocumentInput() {
+        List<DocumentInput<?>> inputs = new ArrayList<>();
+        for (IndexingExecutionEngine<?> delegate : delegates) {
+            inputs.add(delegate.newDocumentInput());
+        }
+        return new CompositeDataFormatWriter.CompositeDocumentInput(inputs, () -> {});
     }
 
     @Override

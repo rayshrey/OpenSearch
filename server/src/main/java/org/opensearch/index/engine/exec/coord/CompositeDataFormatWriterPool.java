@@ -22,17 +22,18 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class CompositeDataFormatWriterPool implements Iterable<CompositeDataFormatWriter>, Closeable {
 
     private final Set<CompositeDataFormatWriter> writers;
     private final LockableConcurrentQueue<CompositeDataFormatWriter> availableWriters;
-    private final Supplier<CompositeDataFormatWriter> writerSupplier;
+    private final Function<Long, CompositeDataFormatWriter> writerSupplier;
     private volatile boolean closed;
 
     public CompositeDataFormatWriterPool(
-        Supplier<CompositeDataFormatWriter> writerSupplier,
+        Function<Long, CompositeDataFormatWriter> writerSupplier,
         Supplier<Queue<CompositeDataFormatWriter>> queueSupplier,
         int concurrency
     ) {
@@ -41,26 +42,15 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
         this.availableWriters = new LockableConcurrentQueue<>(queueSupplier, concurrency);
     }
 
-    /**
-     * This method is used by CompositeIndexingExecutionEngine to grab a writer from the pool to perform an indexing
-     * operation.
-     *
-     * @return a pooled CompositeDataFormatWriter if available, or a newly created instance if none are available
-     */
-    public CompositeDataFormatWriter getAndLock() {
+    public CompositeDataFormatWriter getAndLock(long mappingVersion) {
         ensureOpen();
         CompositeDataFormatWriter compositeDataFormatWriter = availableWriters.lockAndPoll();
-        return Objects.requireNonNullElseGet(compositeDataFormatWriter, this::fetchWriter);
+        return Objects.requireNonNullElseGet(compositeDataFormatWriter, () -> fetchWriter(mappingVersion));
     }
 
-    /**
-     * Create a new {@link CompositeDataFormatWriter} to be added to this pool.
-     *
-     * @return a new instance of {@link CompositeDataFormatWriter}
-     */
-    private synchronized CompositeDataFormatWriter fetchWriter() {
+    private CompositeDataFormatWriter fetchWriter(long mappingVersion) {
         ensureOpen();
-        CompositeDataFormatWriter compositeDataFormatWriter = writerSupplier.get();
+        CompositeDataFormatWriter compositeDataFormatWriter = writerSupplier.apply(mappingVersion);
         compositeDataFormatWriter.lock();
         writers.add(compositeDataFormatWriter);
         return compositeDataFormatWriter;
@@ -110,12 +100,6 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
         return Collections.unmodifiableList(checkedOutWriters);
     }
 
-    /**
-     * Check if {@link CompositeDataFormatWriter} is part of this pool.
-     *
-     * @param perThread {@link CompositeDataFormatWriter} to validate.
-     * @return true if {@link CompositeDataFormatWriter} is part of this pool, false otherwise.
-     */
     synchronized boolean isRegistered(CompositeDataFormatWriter perThread) {
         return writers.contains(perThread);
     }

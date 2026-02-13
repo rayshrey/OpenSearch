@@ -22,6 +22,7 @@ import org.opensearch.index.engine.exec.RefreshInput;
 import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.WriteResult;
 import org.opensearch.index.engine.exec.Writer;
+import org.opensearch.index.engine.exec.WriterProvider;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
@@ -81,6 +82,11 @@ public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.Lucene
 
     }
 
+    @Override
+    public DocumentInput<?> newDocumentInput() {
+        return new LuceneDocumentInput(new ParseContext.Document(), internalEngine.indexWriter);
+    }
+
     public static class LuceneDocumentInput implements DocumentInput<ParseContext.Document> {
 
         private final ParseContext.Document doc;
@@ -107,8 +113,9 @@ public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.Lucene
         }
 
         @Override
-        public WriteResult addToWriter() throws IOException {
-            writer.addDocument(doc);
+        public WriteResult addToWriter(WriterProvider writerProvider) throws IOException {
+            LuceneWriter luceneWriter = (LuceneWriter) writerProvider.getWriter("LUCENE");
+            luceneWriter.addDoc(this);
             return null;
         }
 
@@ -148,11 +155,6 @@ public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.Lucene
         @Override
         public void close() {
             // no-op
-        }
-
-        @Override
-        public LuceneDocumentInput newDocumentInput() {
-            return new LuceneDocumentInput(new ParseContext.Document(), writer);
         }
     }
 }

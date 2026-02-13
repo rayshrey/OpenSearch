@@ -21,7 +21,7 @@ public interface DocumentInput<T> extends AutoCloseable {
 
     T getFinalInput();
 
-    WriteResult addToWriter() throws IOException;
+    WriteResult addToWriter(WriterProvider writerProvider) throws IOException;
 
     default void setVersion(long version) {
         // Default no-op implementations, override as needed

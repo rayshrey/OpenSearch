@@ -536,7 +536,7 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
 
     @Override
     public CompositeDataFormatWriter.CompositeDocumentInput documentInput() {
-        return engine.createCompositeWriter().newDocumentInput();
+        return engine.newDocumentInput();
     }
 
     public Engine.IndexResult index(Engine.Index index) throws IOException {
@@ -579,9 +579,14 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
                         index.documentInput.setSeqNo(index.seqNo());
                         index.documentInput.setPrimaryTerm(SeqNoFieldMapper.PRIMARY_TERM_NAME, index.primaryTerm());
                         index.documentInput.setVersion(1); // we are not supporting update in parquet
-                        WriteResult writeResult = index.documentInput.addToWriter();
-                        indexResult =
-                            new Engine.IndexResult(writeResult.version(), index.primaryTerm(), index.seqNo(), writeResult.success());
+                        CompositeDataFormatWriter writer = (CompositeDataFormatWriter) engine.createCompositeWriter(engine.getMapperService().getIndexSettings().getIndexMetadata().getMappingVersion());
+                        try {
+                            WriteResult writeResult = index.documentInput.addToWriter(writer);
+                            indexResult =
+                                new Engine.IndexResult(writeResult.version(), index.primaryTerm(), index.seqNo(), writeResult.success());
+                        } finally {
+                            writer.performPostWrite();
+                        }
                     } else {
                         indexResult =
                             new Engine.IndexResult(plan.version, index.primaryTerm(), index.seqNo(), plan.currentNotFoundOrDeleted);

@@ -21,6 +21,7 @@ import org.opensearch.index.engine.exec.RefreshInput;
 import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.WriteResult;
 import org.opensearch.index.engine.exec.Writer;
+import org.opensearch.index.engine.exec.WriterProvider;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.merge.MergeResult;
@@ -91,6 +92,11 @@ public class TextEngine implements IndexingExecutionEngine<TextDF> {
 
     }
 
+    @Override
+    public DocumentInput<?> newDocumentInput() {
+        return new TextInput(null);
+    }
+
     public static class TextInput implements DocumentInput<String> {
 
         private final StringBuilder sb = new StringBuilder();
@@ -116,8 +122,9 @@ public class TextEngine implements IndexingExecutionEngine<TextDF> {
         }
 
         @Override
-        public WriteResult addToWriter() throws IOException {
-            return writer.addDoc(this);
+        public WriteResult addToWriter(WriterProvider writerProvider) throws IOException {
+            TextWriter textWriter = (TextWriter) writerProvider.getWriter("TEXT");
+            return textWriter.addDoc(this);
         }
 
         @Override
@@ -195,11 +202,5 @@ public class TextEngine implements IndexingExecutionEngine<TextDF> {
         public void close() {
             onClose.run();
         }
-
-        @Override
-        public TextInput newDocumentInput() {
-            return new TextInput(this);
-        }
-
     }
 }
