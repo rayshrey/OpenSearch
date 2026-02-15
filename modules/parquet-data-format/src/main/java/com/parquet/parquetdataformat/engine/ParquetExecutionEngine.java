@@ -19,6 +19,7 @@ import org.opensearch.index.engine.exec.RefreshInput;
 import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.Writer;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
+import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
 
 import java.io.IOException;
@@ -68,13 +69,14 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
     public static final String FILE_NAME_PREFIX = "_parquet_file_generation";
     public static final String FILE_NAME_EXT = ".parquet";
 
-    private final Supplier<Schema> schema;
+    //private final Supplier<Schema> schema;
+    private final MapperService mapperService;
     private final ShardPath shardPath;
     private final ParquetMerger parquetMerger = new ParquetMergeExecutor(CompactionStrategy.RECORD_BATCH);
     private final ArrowBufferPool arrowBufferPool;
 
-    public ParquetExecutionEngine(Settings settings, Supplier<Schema> schema, ShardPath shardPath) {
-        this.schema = schema;
+    public ParquetExecutionEngine(Settings settings, MapperService mapperService, ShardPath shardPath) {
+        this. mapperService = mapperService;
         this.shardPath = shardPath;
         this.arrowBufferPool = new ArrowBufferPool(settings);
     }
@@ -109,7 +111,7 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
     @Override
     public Writer<ParquetDocumentInput> createWriter(long writerGeneration) {
         String fileName = Path.of(shardPath.getDataPath().toString(), getDataFormat().name(), FILE_NAME_PREFIX + "_" + writerGeneration + FILE_NAME_EXT).toString();
-        return new ParquetWriter(fileName, schema.get(), writerGeneration, arrowBufferPool);
+        return new ParquetWriter(fileName, mapperService, writerGeneration, arrowBufferPool);
     }
 
     @Override

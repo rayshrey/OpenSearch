@@ -1,6 +1,7 @@
 package com.parquet.parquetdataformat.writer;
 
 import com.parquet.parquetdataformat.bridge.ParquetFileMetadata;
+import com.parquet.parquetdataformat.fields.ArrowSchemaBuilder;
 import com.parquet.parquetdataformat.memory.ArrowBufferPool;
 import com.parquet.parquetdataformat.vsr.VSRManager;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -11,6 +12,7 @@ import org.opensearch.index.engine.exec.FlushIn;
 import org.opensearch.index.engine.exec.WriteResult;
 import org.opensearch.index.engine.exec.Writer;
 import org.opensearch.index.engine.exec.WriterFileSet;
+import org.opensearch.index.mapper.MapperService;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -45,9 +47,9 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     private final VSRManager vsrManager;
     private final long writerGeneration;
 
-    public ParquetWriter(String file, Schema schema, long writerGeneration, ArrowBufferPool arrowBufferPool) {
+    public ParquetWriter(String file, MapperService mapperService, long writerGeneration, ArrowBufferPool arrowBufferPool) {
         this.file = file;
-        this.schema = schema;
+        this.schema = ArrowSchemaBuilder.getSchema(mapperService);
         this.vsrManager = new VSRManager(file, schema, arrowBufferPool);
         this.writerGeneration = writerGeneration;
     }

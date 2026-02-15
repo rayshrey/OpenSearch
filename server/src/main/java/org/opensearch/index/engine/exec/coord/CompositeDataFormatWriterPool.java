@@ -19,17 +19,20 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Objects;
+import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class CompositeDataFormatWriterPool implements Iterable<CompositeDataFormatWriter>, Closeable {
 
-    private final Set<CompositeDataFormatWriter> writers;
-    private final LockableConcurrentQueue<CompositeDataFormatWriter> availableWriters;
+    private final Map<Long, Set<CompositeDataFormatWriter>> writersByVersion;
+    private final Map<Long, LockableConcurrentQueue<CompositeDataFormatWriter>> availableWritersByVersion;
     private final Function<Long, CompositeDataFormatWriter> writerSupplier;
+    private final Supplier<Queue<CompositeDataFormatWriter>> queueSupplier;
+    private final int concurrency;
     private volatile boolean closed;
 
     public CompositeDataFormatWriterPool(
@@ -37,71 +40,102 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
         Supplier<Queue<CompositeDataFormatWriter>> queueSupplier,
         int concurrency
     ) {
-        this.writers = Collections.newSetFromMap(new IdentityHashMap<>());
+        this.writersByVersion = new ConcurrentHashMap<>();
+        this.availableWritersByVersion = new ConcurrentHashMap<>();
         this.writerSupplier = writerSupplier;
-        this.availableWriters = new LockableConcurrentQueue<>(queueSupplier, concurrency);
+        this.queueSupplier = queueSupplier;
+        this.concurrency = concurrency;
     }
 
     public CompositeDataFormatWriter getAndLock(long mappingVersion) {
         ensureOpen();
-        CompositeDataFormatWriter compositeDataFormatWriter = availableWriters.lockAndPoll();
-        return Objects.requireNonNullElseGet(compositeDataFormatWriter, () -> fetchWriter(mappingVersion));
+        LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
+            availableWritersByVersion.computeIfAbsent(mappingVersion, 
+                k -> new LockableConcurrentQueue<>(queueSupplier, concurrency));
+        
+        CompositeDataFormatWriter writer = versionQueue.lockAndPoll();
+        if (writer != null) {
+            return writer;
+        }
+        return fetchWriter(mappingVersion);
     }
 
     private CompositeDataFormatWriter fetchWriter(long mappingVersion) {
         ensureOpen();
-        CompositeDataFormatWriter compositeDataFormatWriter = writerSupplier.apply(mappingVersion);
-        compositeDataFormatWriter.lock();
-        writers.add(compositeDataFormatWriter);
-        return compositeDataFormatWriter;
+        CompositeDataFormatWriter writer = writerSupplier.apply(mappingVersion);
+        writer.lock();
+        writersByVersion.computeIfAbsent(mappingVersion, 
+            k -> Collections.newSetFromMap(new IdentityHashMap<>())).add(writer);
+        return writer;
     }
 
-    /**
-     * Release the given {@link CompositeDataFormatWriter} to this pool for reuse if it is currently managed by this
-     * pool.
-     *
-     * @param state {@link CompositeDataFormatWriter} to release to the pool.
-     */
     public void releaseAndUnlock(CompositeDataFormatWriter state) {
         assert
             !state.isFlushPending() && !state.isAborted() :
             "CompositeDataFormatWriter has pending flush: " + state.isFlushPending() + " aborted=" + state.isAborted();
         assert isRegistered(state) : "CompositeDocumentWriterPool doesn't know about this CompositeDataFormatWriter";
-        availableWriters.addAndUnlock(state);
+        
+        LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
+            availableWritersByVersion.get(state.getMappingVersion());
+        if (versionQueue != null) {
+            versionQueue.addAndUnlock(state);
+        }
     }
 
-    /**
-     * Lock and checkout all CompositeDataFormatWriters from the pool for flush.
-     *
-     * @return Unmodifiable list of all CompositeDataFormatWriters locked by current thread.
-     */
     public List<CompositeDataFormatWriter> checkoutAll() {
         ensureOpen();
         List<CompositeDataFormatWriter> lockedWriters = new ArrayList<>();
         List<CompositeDataFormatWriter> checkedOutWriters = new ArrayList<>();
-        for (CompositeDataFormatWriter compositeDataFormatWriter : this) {
-            compositeDataFormatWriter.lock();
-            lockedWriters.add(compositeDataFormatWriter);
+        
+        for (CompositeDataFormatWriter writer : this) {
+            writer.lock();
+            lockedWriters.add(writer);
         }
+        
         synchronized (this) {
-            for (CompositeDataFormatWriter compositeDataFormatWriter : lockedWriters) {
+            for (CompositeDataFormatWriter writer : lockedWriters) {
                 try {
-                    // Release this writer if it’s no longer managed by this pool; otherwise, check it out.
-                    if (isRegistered(compositeDataFormatWriter) && writers.remove(compositeDataFormatWriter)) {
-                        availableWriters.remove(compositeDataFormatWriter);
-                        compositeDataFormatWriter.setFlushPending();
-                        checkedOutWriters.add(compositeDataFormatWriter);
+                    if (isRegistered(writer)) {
+                        Set<CompositeDataFormatWriter> versionWriters = writersByVersion.get(writer.getMappingVersion());
+                        if (versionWriters != null && versionWriters.remove(writer)) {
+                            LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
+                                availableWritersByVersion.get(writer.getMappingVersion());
+                            if (versionQueue != null) {
+                                versionQueue.remove(writer);
+                            }
+                            writer.setFlushPending();
+                            checkedOutWriters.add(writer);
+                        }
                     }
                 } finally {
-                    compositeDataFormatWriter.unlock();
+                    writer.unlock();
                 }
             }
         }
+        
         return Collections.unmodifiableList(checkedOutWriters);
     }
 
-    synchronized boolean isRegistered(CompositeDataFormatWriter perThread) {
-        return writers.contains(perThread);
+    public List<CompositeDataFormatWriter> checkoutByVersion(long mappingVersion) {
+        ensureOpen();
+        List<CompositeDataFormatWriter> checkedOutWriters = new ArrayList<>();
+        
+        Set<CompositeDataFormatWriter> versionWriters = writersByVersion.get(mappingVersion);
+        if (versionWriters != null) {
+            synchronized (this) {
+                for (CompositeDataFormatWriter writer : versionWriters) {
+                    writer.setFlushPending();
+                    checkedOutWriters.add(writer);
+                }
+            }
+        }
+        
+        return Collections.unmodifiableList(checkedOutWriters);
+    }
+
+    synchronized boolean isRegistered(CompositeDataFormatWriter writer) {
+        return writersByVersion.values().stream()
+            .anyMatch(set -> set.contains(writer));
     }
 
     private void ensureOpen() {
@@ -112,7 +146,11 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
 
     @Override
     public synchronized Iterator<CompositeDataFormatWriter> iterator() {
-        return List.copyOf(writers).iterator();
+        List<CompositeDataFormatWriter> allWriters = new ArrayList<>();
+        for (Set<CompositeDataFormatWriter> versionWriters : writersByVersion.values()) {
+            allWriters.addAll(versionWriters);
+        }
+        return allWriters.iterator();
     }
 
     @Override
