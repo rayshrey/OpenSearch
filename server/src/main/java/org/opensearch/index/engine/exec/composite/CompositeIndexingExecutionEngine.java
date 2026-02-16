@@ -130,7 +130,7 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
     }
 
     @Override
-    public Writer<CompositeDataFormatWriter.CompositeDocumentInput> createWriter(long generation) throws IOException {
+    public Writer<CompositeDataFormatWriter.CompositeDocumentInput> createWriter(long generation, long mappingVersion) throws IOException {
         throw new UnsupportedOperationException();
     }
 

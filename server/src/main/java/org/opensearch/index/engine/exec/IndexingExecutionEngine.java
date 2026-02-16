@@ -20,7 +20,7 @@ public interface IndexingExecutionEngine<T extends DataFormat> extends Closeable
 
     List<String> supportedFieldTypes();
 
-    Writer<? extends DocumentInput<?>> createWriter(long writerGeneration)
+    Writer<? extends DocumentInput<?>> createWriter(long writerGeneration, long mappingVersion)
         throws IOException; // A writer responsible for data format vended by this engine.
 
     Merger getMerger(); // Merger responsible for merging for specific data format

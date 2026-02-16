@@ -1,6 +1,7 @@
 package com.parquet.parquetdataformat.engine;
 
 import com.parquet.parquetdataformat.bridge.RustBridge;
+import com.parquet.parquetdataformat.fields.ArrowSchemaBuilder;
 import com.parquet.parquetdataformat.memory.ArrowBufferPool;
 import com.parquet.parquetdataformat.merge.CompactionStrategy;
 import com.parquet.parquetdataformat.merge.ParquetMergeExecutor;
@@ -29,6 +30,7 @@ import java.nio.file.Paths;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 import static com.parquet.parquetdataformat.engine.ParquetDataFormat.PARQUET_DATA_FORMAT;
@@ -71,6 +73,7 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
 
     //private final Supplier<Schema> schema;
     private final MapperService mapperService;
+    private final Map<Long, Schema> versionSchemaMap;
     private final ShardPath shardPath;
     private final ParquetMerger parquetMerger = new ParquetMergeExecutor(CompactionStrategy.RECORD_BATCH);
     private final ArrowBufferPool arrowBufferPool;
@@ -79,6 +82,7 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
         this. mapperService = mapperService;
         this.shardPath = shardPath;
         this.arrowBufferPool = new ArrowBufferPool(settings);
+        this.versionSchemaMap = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -109,9 +113,10 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
     }
 
     @Override
-    public Writer<ParquetDocumentInput> createWriter(long writerGeneration) {
+    public Writer<ParquetDocumentInput> createWriter(long writerGeneration, long mappingVersion) {
         String fileName = Path.of(shardPath.getDataPath().toString(), getDataFormat().name(), FILE_NAME_PREFIX + "_" + writerGeneration + FILE_NAME_EXT).toString();
-        return new ParquetWriter(fileName, mapperService, writerGeneration, arrowBufferPool);
+        Schema schema = versionSchemaMap.computeIfAbsent(mappingVersion, version -> ArrowSchemaBuilder.getSchema(mapperService));
+        return new ParquetWriter(fileName, schema, writerGeneration, arrowBufferPool);
     }
 
     @Override

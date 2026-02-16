@@ -66,6 +66,8 @@ public final class ArrowSchemaBuilder {
      */
     private static List<Field> extractFieldsFromMappers(final MapperService mapperService) {
         final List<Field> fields = new ArrayList<>();
+        if (mapperService.documentMapper() == null)
+            return fields;
 
         for (final Mapper mapper : mapperService.documentMapper().mappers()) {
             if (notSupportedMetadataField(mapper)) {

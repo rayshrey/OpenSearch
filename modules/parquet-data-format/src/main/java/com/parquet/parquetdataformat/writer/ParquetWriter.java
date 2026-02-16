@@ -47,9 +47,9 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     private final VSRManager vsrManager;
     private final long writerGeneration;
 
-    public ParquetWriter(String file, MapperService mapperService, long writerGeneration, ArrowBufferPool arrowBufferPool) {
+    public ParquetWriter(String file, Schema schema, long writerGeneration, ArrowBufferPool arrowBufferPool) {
         this.file = file;
-        this.schema = ArrowSchemaBuilder.getSchema(mapperService);
+        this.schema = schema;
         this.vsrManager = new VSRManager(file, schema, arrowBufferPool);
         this.writerGeneration = writerGeneration;
     }

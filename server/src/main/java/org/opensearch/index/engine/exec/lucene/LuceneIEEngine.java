@@ -47,7 +47,7 @@ public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.Lucene
     }
 
     @Override
-    public Writer<? extends DocumentInput<?>> createWriter(long writerGeneration) throws IOException {
+    public Writer<? extends DocumentInput<?>> createWriter(long writerGeneration, long mappingVersion) throws IOException {
         return new LuceneWriter(internalEngine.indexWriter, writerGeneration);
     }
 

@@ -55,7 +55,7 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
         this.mappingVersion = mappingVersion;
         engine.getDelegates().forEach(delegate -> {
             try {
-                writers.add(new AbstractMap.SimpleImmutableEntry<>(delegate.getDataFormat(), delegate.createWriter(writerGeneration)));
+                writers.add(new AbstractMap.SimpleImmutableEntry<>(delegate.getDataFormat(), delegate.createWriter(writerGeneration, mappingVersion)));
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }

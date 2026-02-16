@@ -53,7 +53,7 @@ public class TextEngine implements IndexingExecutionEngine<TextDF> {
     }
 
     @Override
-    public Writer<? extends DocumentInput<?>> createWriter(long writerGeneration) throws IOException {
+    public Writer<? extends DocumentInput<?>> createWriter(long writerGeneration, long mappingVersion) throws IOException {
         return new TextWriter("text_file" + counter.getAndIncrement(), this, writerGeneration);
     }
 
