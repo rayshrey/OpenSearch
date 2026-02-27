@@ -42,6 +42,7 @@ public class VSRManager implements AutoCloseable {
     private final String fileName;
     private final VSRPool vsrPool;
     private NativeParquetWriter writer;
+    private Runnable onSchemaImmutableCallback;
 
 
     public VSRManager(String fileName, Schema schema, ArrowBufferPool arrowBufferPool) {
@@ -56,6 +57,11 @@ public class VSRManager implements AutoCloseable {
 
         // Initialize writer lazily to avoid crashes
         initializeWriter();
+    }
+
+    public void setOnSchemaImmutableCallback(Runnable callback) {
+        this.onSchemaImmutableCallback = callback;
+        this.vsrPool.setOnSchemaImmutableCallback(callback);
     }
 
     private void initializeWriter() {
@@ -117,8 +123,13 @@ public class VSRManager implements AutoCloseable {
             ParquetFileMetadata metadata;
 
             // Write through native writer handle
-            try (ArrowExport export = currentVSR.exportToArrow()) {
-                writer.write(export.getArrayAddress(), export.getSchemaAddress());
+            try (ArrowExport export = currentVSR.exportToArrow();
+                 ArrowExport schemaExport = currentVSR.exportSchema()) {
+                if (!writer.isWriterInitialized()) {
+                    writer.write(export.getArrayAddress(), export.getSchemaAddress(), schemaExport.getSchemaAddress());
+                } else {
+                    writer.write(export.getArrayAddress(), export.getSchemaAddress());
+                }
                 writer.close();
                 metadata = writer.getMetadata();
             }
@@ -188,8 +199,14 @@ public class VSRManager implements AutoCloseable {
                         frozenVSR.getId(), frozenVSR.getRowCount(), fileName);
 
                     // Write the frozen VSR data immediately
-                    try (ArrowExport export = frozenVSR.exportToArrow()) {
-                        writer.write(export.getArrayAddress(), export.getSchemaAddress());
+                    try (ArrowExport export = frozenVSR.exportToArrow();
+                         ArrowExport schemaExport = frozenVSR.exportSchema()) {
+                        if (!writer.isWriterInitialized()) {
+                            writer.write(export.getArrayAddress(), export.getSchemaAddress(), schemaExport.getSchemaAddress());
+                        } else {
+                            writer.write(export.getArrayAddress(), export.getSchemaAddress());
+                        }
+                        //writer.write(export.getArrayAddress(), export.getSchemaAddress());
                     }
 
                     logger.debug("Successfully wrote frozen VSR data for {}", fileName);

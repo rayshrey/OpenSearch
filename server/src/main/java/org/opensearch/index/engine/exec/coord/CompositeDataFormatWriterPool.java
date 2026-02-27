@@ -28,6 +28,8 @@ import java.util.function.Supplier;
 
 public class CompositeDataFormatWriterPool implements Iterable<CompositeDataFormatWriter>, Closeable {
 
+    private static final long MODIFIABLE_VERSION_KEY = -1L;
+
     private final Map<Long, Set<CompositeDataFormatWriter>> writersByVersion;
     private final Map<Long, LockableConcurrentQueue<CompositeDataFormatWriter>> availableWritersByVersion;
     private final Function<Long, CompositeDataFormatWriter> writerSupplier;
@@ -49,14 +51,29 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
 
     public CompositeDataFormatWriter getAndLock(long mappingVersion) {
         ensureOpen();
-        LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
-            availableWritersByVersion.computeIfAbsent(mappingVersion, 
-                k -> new LockableConcurrentQueue<>(queueSupplier, concurrency));
         
-        CompositeDataFormatWriter writer = versionQueue.lockAndPoll();
-        if (writer != null) {
-            return writer;
+        // Phase 1: Try to get a modifiable writer (version -1)
+        LockableConcurrentQueue<CompositeDataFormatWriter> modifiableQueue = 
+            availableWritersByVersion.get(MODIFIABLE_VERSION_KEY);
+        if (modifiableQueue != null) {
+            CompositeDataFormatWriter writer = modifiableQueue.lockAndPoll();
+            if (writer != null) {
+                writer.updateMappingVersion(mappingVersion);
+                return writer;
+            }
         }
+        
+        // Phase 2: Try to get version-specific immutable writer
+        LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
+            availableWritersByVersion.get(mappingVersion);
+        if (versionQueue != null) {
+            CompositeDataFormatWriter writer = versionQueue.lockAndPoll();
+            if (writer != null) {
+                return writer;
+            }
+        }
+        
+        // Phase 3: Create new writer
         return fetchWriter(mappingVersion);
     }
 
@@ -64,7 +81,7 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
         ensureOpen();
         CompositeDataFormatWriter writer = writerSupplier.apply(mappingVersion);
         writer.lock();
-        writersByVersion.computeIfAbsent(mappingVersion, 
+        writersByVersion.computeIfAbsent(MODIFIABLE_VERSION_KEY, 
             k -> Collections.newSetFromMap(new IdentityHashMap<>())).add(writer);
         return writer;
     }
@@ -75,9 +92,25 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
             "CompositeDataFormatWriter has pending flush: " + state.isFlushPending() + " aborted=" + state.isAborted();
         assert isRegistered(state) : "CompositeDocumentWriterPool doesn't know about this CompositeDataFormatWriter";
         
-        LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
-            availableWritersByVersion.get(state.getMappingVersion());
-        if (versionQueue != null) {
+        if (state.isSchemaMutable()) {
+            // Still modifiable - return to modifiable queue (version -1)
+            LockableConcurrentQueue<CompositeDataFormatWriter> modifiableQueue = 
+                availableWritersByVersion.computeIfAbsent(MODIFIABLE_VERSION_KEY,
+                    k -> new LockableConcurrentQueue<>(queueSupplier, concurrency));
+            modifiableQueue.addAndUnlock(state);
+        } else {
+            // Became immutable - move from modifiable to version-specific
+            synchronized (this) {
+                Set<CompositeDataFormatWriter> modifiableSet = writersByVersion.get(MODIFIABLE_VERSION_KEY);
+                if (modifiableSet != null && modifiableSet.remove(state)) {
+                    writersByVersion.computeIfAbsent(state.getMappingVersion(),
+                        k -> Collections.newSetFromMap(new IdentityHashMap<>())).add(state);
+                }
+            }
+            
+            LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
+                availableWritersByVersion.computeIfAbsent(state.getMappingVersion(),
+                    k -> new LockableConcurrentQueue<>(queueSupplier, concurrency));
             versionQueue.addAndUnlock(state);
         }
     }
@@ -96,13 +129,20 @@ public class CompositeDataFormatWriterPool implements Iterable<CompositeDataForm
             for (CompositeDataFormatWriter writer : lockedWriters) {
                 try {
                     if (isRegistered(writer)) {
-                        Set<CompositeDataFormatWriter> versionWriters = writersByVersion.get(writer.getMappingVersion());
+                        // Determine which version key the writer is in BEFORE making it immutable
+                        Long writerVersionKey = writer.isSchemaMutable() ? MODIFIABLE_VERSION_KEY : writer.getMappingVersion();
+                        
+                        writer.makeSchemaImmutable();
+                        
+                        Set<CompositeDataFormatWriter> versionWriters = writersByVersion.get(writerVersionKey);
                         if (versionWriters != null && versionWriters.remove(writer)) {
+                            // Remove from the appropriate queue
                             LockableConcurrentQueue<CompositeDataFormatWriter> versionQueue = 
-                                availableWritersByVersion.get(writer.getMappingVersion());
+                                availableWritersByVersion.get(writerVersionKey);
                             if (versionQueue != null) {
                                 versionQueue.remove(writer);
                             }
+                            
                             writer.setFlushPending();
                             checkedOutWriters.add(writer);
                         }

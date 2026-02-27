@@ -25,7 +25,7 @@ public class ManagedVSR implements AutoCloseable {
     private static final Logger logger = LogManager.getLogger(ManagedVSR.class);
 
     private final String id;
-    private final VectorSchemaRoot vsr;
+    private VectorSchemaRoot vsr;
     private final BufferAllocator allocator;
     private VSRState state;
     private final Map<String, Field> fields = new HashMap<>();
@@ -194,6 +194,15 @@ public class ManagedVSR implements AutoCloseable {
      */
     public BufferAllocator getAllocator() {
         return allocator;
+    }
+
+    public void addFieldVector(Field field, FieldVector vector) {
+        if (state != VSRState.ACTIVE) {
+            throw new IllegalStateException("Cannot add field to VSR in state: " + state);
+        }
+        vsr = vsr.addVector(vsr.getFieldVectors().size()-1, vector);
+        fields.put(field.getName(), field);
+        //vsr.syncSchema();
     }
 
     /**

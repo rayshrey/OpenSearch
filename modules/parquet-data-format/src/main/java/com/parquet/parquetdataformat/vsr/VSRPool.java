@@ -24,6 +24,7 @@ public class VSRPool implements AutoCloseable {
     private final Schema schema;
     private final ArrowBufferPool bufferPool;
     private final String poolId;
+    private Runnable onSchemaImmutableCallback;
 
     // VSR lifecycle management
     private final AtomicReference<ManagedVSR> activeVSR;
@@ -42,7 +43,7 @@ public class VSRPool implements AutoCloseable {
         this.vsrCounter = new AtomicInteger(0);
 
         // Configuration - could be made configurable
-        this.maxRowsPerVSR = 50000; // Max rows before forcing freeze
+        this.maxRowsPerVSR = 5; // Max rows before forcing freeze
 
         // Initialize with first active VSR
         initializeActiveVSR();
@@ -288,6 +289,14 @@ public class VSRPool implements AutoCloseable {
     }
 
     private boolean shouldRotateVSR(ManagedVSR vsr) {
-        return vsr.getRowCount() >= maxRowsPerVSR;
+        boolean shouldRotate = vsr.getRowCount() >= maxRowsPerVSR;
+        if (shouldRotate && onSchemaImmutableCallback != null) {
+            onSchemaImmutableCallback.run();
+        }
+        return shouldRotate;
+    }
+
+    public void setOnSchemaImmutableCallback(Runnable callback) {
+        this.onSchemaImmutableCallback = callback;
     }
 }

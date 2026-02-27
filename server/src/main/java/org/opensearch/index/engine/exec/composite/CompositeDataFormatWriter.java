@@ -42,7 +42,7 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
     private final SetOnce<Boolean> flushPending = new SetOnce<>();
     private final SetOnce<Boolean> hasFlushed = new SetOnce<>();
     private final long writerGeneration;
-    private final long mappingVersion;
+    private long mappingVersion;
     private boolean aborted;
     private final RowIdGenerator rowIdGenerator;
     public static final String ROW_ID = "___row_id";
@@ -159,6 +159,34 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
 
     public long getMappingVersion() {
         return mappingVersion;
+    }
+
+    @Override
+    public void updateMappingVersion(long newVersion) {
+        assert isSchemaMutable() : "Cannot update version of immutable writer";
+        assert newVersion >= this.mappingVersion : "Version must be monotonically increasing";
+        this.mappingVersion = newVersion;
+        for (Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>> writerPair : writers) {
+            writerPair.getValue().updateMappingVersion(newVersion);
+        }
+    }
+
+    @Override
+    public boolean isSchemaMutable() {
+        // All delegate writers must be mutable for composite to be mutable
+        for (Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>> writerPair : writers) {
+            if (!writerPair.getValue().isSchemaMutable()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public void makeSchemaImmutable() {
+        for (Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>> writerPair : writers) {
+            writerPair.getValue().makeSchemaImmutable();
+        }
     }
 
     public List<Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>>> getWriters() {

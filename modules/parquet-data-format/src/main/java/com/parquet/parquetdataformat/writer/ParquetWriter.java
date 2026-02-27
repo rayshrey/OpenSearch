@@ -46,12 +46,19 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     private final Schema schema;
     private final VSRManager vsrManager;
     private final long writerGeneration;
+    private long mappingVersion;
+    private volatile boolean isSchemaMutable;
 
     public ParquetWriter(String file, Schema schema, long writerGeneration, ArrowBufferPool arrowBufferPool) {
         this.file = file;
         this.schema = schema;
         this.vsrManager = new VSRManager(file, schema, arrowBufferPool);
         this.writerGeneration = writerGeneration;
+        this.mappingVersion = writerGeneration;
+        this.isSchemaMutable = true;
+        
+        // Set callback to make schema immutable when threshold is reached
+        this.vsrManager.setOnSchemaImmutableCallback(this::makeSchemaImmutable);
     }
 
     @Override
@@ -84,6 +91,23 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     @Override
     public void close() {
         vsrManager.close();
+    }
+
+    @Override
+    public void updateMappingVersion(long newVersion) {
+        assert isSchemaMutable : "Cannot update version of immutable writer";
+        assert newVersion >= this.mappingVersion : "Version must be monotonically increasing";
+        this.mappingVersion = newVersion;
+    }
+
+    @Override
+    public boolean isSchemaMutable() {
+        return isSchemaMutable;
+    }
+
+    @Override
+    public void makeSchemaImmutable() {
+        this.isSchemaMutable = false;
     }
 
     public VSRManager getVSRManager() {

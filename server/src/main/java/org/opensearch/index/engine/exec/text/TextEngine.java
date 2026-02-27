@@ -161,11 +161,15 @@ public class TextEngine implements IndexingExecutionEngine<TextDF> {
         private final AtomicBoolean flushed = new AtomicBoolean(false);
         private final Runnable onClose;
         private final long writerGeneration;
+        private long mappingVersion;
+        private volatile boolean isSchemaMutable = true;
 
         public TextWriter(String currentFile, TextEngine engine, long writerGeneration) throws IOException {
             this.currentFile = new File("/Users/shnkgo/mustang" + currentFile);
             this.currentFile.createNewFile();
             this.writerGeneration = writerGeneration;
+            this.mappingVersion = writerGeneration;
+            this.isSchemaMutable = true;
             boolean canWrite = this.currentFile.setWritable(true);
             if (!canWrite) {
                 throw new IllegalStateException("Cannot write to file [" + currentFile + "]");
@@ -201,6 +205,22 @@ public class TextEngine implements IndexingExecutionEngine<TextDF> {
         @Override
         public void close() {
             onClose.run();
+        }
+
+        @Override
+        public void updateMappingVersion(long newVersion) {
+            assert isSchemaMutable : "Cannot update version of immutable writer";
+            this.mappingVersion = newVersion;
+        }
+
+        @Override
+        public boolean isSchemaMutable() {
+            return isSchemaMutable;
+        }
+
+        @Override
+        public void makeSchemaImmutable() {
+            this.isSchemaMutable = false;
         }
     }
 }

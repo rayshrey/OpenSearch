@@ -129,10 +129,14 @@ public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.Lucene
 
         private final IndexWriter writer;
         private final long writerGeneration;
+        private long mappingVersion;
+        private volatile boolean isSchemaMutable = true;
 
         public LuceneWriter(IndexWriter writer, long writerGeneration) {
             this.writer = writer;
             this.writerGeneration = writerGeneration;
+            this.mappingVersion = writerGeneration;
+            this.isSchemaMutable = true;
         }
 
         @Override
@@ -155,6 +159,22 @@ public class LuceneIEEngine implements IndexingExecutionEngine<DataFormat.Lucene
         @Override
         public void close() {
             // no-op
+        }
+
+        @Override
+        public void updateMappingVersion(long newVersion) {
+            assert isSchemaMutable : "Cannot update version of immutable writer";
+            this.mappingVersion = newVersion;
+        }
+
+        @Override
+        public boolean isSchemaMutable() {
+            return isSchemaMutable;
+        }
+
+        @Override
+        public void makeSchemaImmutable() {
+            this.isSchemaMutable = false;
         }
     }
 }

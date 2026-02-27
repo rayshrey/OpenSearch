@@ -19,4 +19,10 @@ public interface Writer<P extends DocumentInput<?>> {
     void sync() throws IOException;
 
     void close();
+
+    void updateMappingVersion(long newVersion);
+
+    boolean isSchemaMutable();
+
+    void makeSchemaImmutable();
 }

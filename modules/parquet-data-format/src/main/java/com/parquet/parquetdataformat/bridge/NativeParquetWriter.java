@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class NativeParquetWriter implements Closeable {
 
+    private volatile boolean writerInitialized = false;
     private final AtomicBoolean writerClosed = new AtomicBoolean(false);
     private final String filePath;
 
@@ -28,7 +29,7 @@ public class NativeParquetWriter implements Closeable {
      */
     public NativeParquetWriter(String filePath, long schemaAddress) throws IOException {
         this.filePath = filePath;
-        RustBridge.createWriter(filePath, schemaAddress);
+        //RustBridge.createWriter(filePath, schemaAddress);
     }
 
     /**
@@ -38,6 +39,14 @@ public class NativeParquetWriter implements Closeable {
      * @throws IOException if write fails
      */
     public void write(long arrayAddress, long schemaAddress) throws IOException {
+        RustBridge.write(filePath, arrayAddress, schemaAddress);
+    }
+
+    public void write(long arrayAddress, long schemaAddress, long schemaAddressCreate) throws IOException {
+        if (!writerInitialized) {
+            RustBridge.createWriter(filePath, schemaAddressCreate);
+            writerInitialized = true;
+        }
         RustBridge.write(filePath, arrayAddress, schemaAddress);
     }
 
@@ -68,5 +77,9 @@ public class NativeParquetWriter implements Closeable {
 
     public String getFilePath() {
         return filePath;
+    }
+
+    public boolean isWriterInitialized() {
+        return writerInitialized;
     }
 }
