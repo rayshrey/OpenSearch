@@ -787,7 +787,8 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
 
             // Call checkpoint listener's afterRefresh to update refreshed checkpoint
             if (refreshed) {
-                triggerPossibleMerges(); // trigger merges
+                // TODO - Remove after multiple schema support is added in Merges
+                //triggerPossibleMerges(); // trigger merges
             }
         } catch (Exception ex) {
             try {
@@ -836,7 +837,7 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
     }
 
     public void triggerPossibleMerges() {
-        mergeScheduler.triggerMerges();
+        //mergeScheduler.triggerMerges();
     }
 
     // This should get wired into searcher acquireSnapshot for initializing reader context later

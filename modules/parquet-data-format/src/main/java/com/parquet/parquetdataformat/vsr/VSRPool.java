@@ -43,7 +43,7 @@ public class VSRPool implements AutoCloseable {
         this.vsrCounter = new AtomicInteger(0);
 
         // Configuration - could be made configurable
-        this.maxRowsPerVSR = 5; // Max rows before forcing freeze
+        this.maxRowsPerVSR = 50000; // Max rows before forcing freeze
 
         // Initialize with first active VSR
         initializeActiveVSR();
