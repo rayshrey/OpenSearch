@@ -3,6 +3,9 @@ name = "rust"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+test-utils = []
+
 [lib]
 name = "parquet_dataformat_jni"
 crate-type = ["cdylib", "lib"]
@@ -62,6 +65,9 @@ mimalloc = { version = "0.1.48", default-features = false }
 
 [build-dependencies]
 cbindgen = "0.27"
+
+[dev-dependencies]
+parquet_dataformat_jni = { path = ".", package = "rust", features = ["test-utils"] }
 
 [profile.release]
 debug = "line-tables-only"
