@@ -34,7 +34,6 @@ import java.util.Map;
 public class DataFormatAwareEngineFactory {
 
     private final Map<DataFormat, EngineReaderManager<?>> readerManagers = new HashMap<>();
-    private final IndexFileDeleter indexFileDeleter;
 
     @SuppressWarnings("rawtypes")
     public DataFormatAwareEngineFactory(
@@ -53,7 +52,6 @@ public class DataFormatAwareEngineFactory {
                 readerManagers.put(format, plugin.createReaderManager(format, shardPath));
             }
         }
-        this.indexFileDeleter = new IndexFileDeleter(null, shardPath);
     }
 
     /**
@@ -66,11 +64,11 @@ public class DataFormatAwareEngineFactory {
 
     /**
      * Creates a {@link CatalogSnapshotLifecycleListener} that routes events
-     * through the {@link IndexFileDeleter} and fans out to the given reader managers.
+     * to the given reader managers.
      *
      * @param readerManagers the per-format reader managers that receive notifications
      */
     public CatalogSnapshotLifecycleListener createCatalogSnapshotListener(Map<DataFormat, EngineReaderManager<?>> readerManagers) {
-        return new DataFormatEngineCatalogSnapshotListener(readerManagers, indexFileDeleter);
+        return new DataFormatEngineCatalogSnapshotListener(readerManagers);
     }
 }
