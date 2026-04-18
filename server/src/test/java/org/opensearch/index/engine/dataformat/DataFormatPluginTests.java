@@ -13,6 +13,7 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.plugins.NativeStoreHandle;
 import org.opensearch.index.engine.dataformat.stub.MockCatalogSnapshot;
 import org.opensearch.index.engine.dataformat.stub.MockDataFormat;
 import org.opensearch.index.engine.dataformat.stub.MockDataFormatPlugin;
@@ -86,7 +87,8 @@ public class DataFormatPluginTests extends OpenSearchTestCase {
                     mock(MapperService.class),
                     new IndexSettings(IndexMetadata.builder("index").settings(settings).build(), settings),
                     null,
-                    null
+                    null,
+                    NativeStoreHandle.EMPTY
                 ),
                 null
             );

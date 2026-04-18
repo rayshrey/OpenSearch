@@ -13,6 +13,7 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.commit.Committer;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.store.Store;
+import org.opensearch.plugins.NativeStoreHandle;
 
 /**
  * Initialization parameters for creating an {@link IndexingExecutionEngine} via
@@ -24,10 +25,11 @@ import org.opensearch.index.store.Store;
  * @param indexSettings the index-level settings
  * @param store the shard's store, or null if not available
  * @param registry DataFormatRegistry containing information about registered data formats.
+ * @param nativeStoreHandle the shard-scoped native object store handle, or {@link NativeStoreHandle#EMPTY}
  *
  * @opensearch.experimental
  */
 @ExperimentalApi
 public record IndexingEngineConfig(Committer committer, MapperService mapperService, IndexSettings indexSettings, Store store,
-    DataFormatRegistry registry) {
+    DataFormatRegistry registry, NativeStoreHandle nativeStoreHandle) {
 }

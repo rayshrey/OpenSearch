@@ -115,6 +115,7 @@ import org.opensearch.indices.mapper.MapperRegistry;
 import org.opensearch.indices.recovery.DefaultRecoverySettings;
 import org.opensearch.indices.recovery.RecoveryState;
 import org.opensearch.plugins.IndexStorePlugin;
+import org.opensearch.repositories.NativeStoreRepository;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
 import org.opensearch.search.internal.ReaderContext;
@@ -861,21 +862,10 @@ public class IndexModuleTests extends OpenSearchTestCase {
             ShardLock shardLock,
             Store.OnClose onClose,
             ShardPath shardPath,
-            IndexStorePlugin.DirectoryFactory directoryFactory
+            IndexStorePlugin.DirectoryFactory directoryFactory,
+            NativeStoreRepository nativeStoreRepository
         ) throws IOException {
-            return new Store(shardId, indexSettings, directory, shardLock, onClose, shardPath, directoryFactory);
-        }
-
-        @Override
-        public Store newStore(
-            ShardId shardId,
-            IndexSettings indexSettings,
-            Directory directory,
-            ShardLock shardLock,
-            Store.OnClose onClose,
-            ShardPath shardPath
-        ) throws IOException {
-            return new Store(shardId, indexSettings, directory, shardLock, onClose, shardPath);
+            return new Store(shardId, indexSettings, directory, shardLock, onClose, shardPath, directoryFactory, nativeStoreRepository);
         }
     }
 

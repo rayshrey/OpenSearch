@@ -16,6 +16,7 @@ import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.Store;
 import org.opensearch.plugins.IndexStorePlugin;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.repositories.NativeStoreRepository;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -60,7 +61,7 @@ public class SubdirectoryStorePlugin extends Plugin implements IndexStorePlugin 
      */
     static class SubdirectoryStoreFactory implements StoreFactory {
         /**
-         * Creates a new {@link SubdirectoryAwareStore} instance.
+         * Creates a new {@link SubdirectoryAwareStore} instance with native store support.
          *
          * @param shardId the shard identifier
          * @param indexSettings the index settings
@@ -68,31 +69,8 @@ public class SubdirectoryStorePlugin extends Plugin implements IndexStorePlugin 
          * @param shardLock the shard lock
          * @param onClose callback to execute when the store is closed
          * @param shardPath the path information for the shard
-         * @return a new SubdirectoryAwareStore instance
-         */
-        @Override
-        public Store newStore(
-            ShardId shardId,
-            IndexSettings indexSettings,
-            Directory directory,
-            ShardLock shardLock,
-            Store.OnClose onClose,
-            ShardPath shardPath
-        ) {
-            return new SubdirectoryAwareStore(shardId, indexSettings, directory, shardLock, onClose, shardPath);
-        }
-
-        /**
-         * Creates a new {@link SubdirectoryAwareStore} instance.
-         *
-         * @param shardId the shard identifier
-         * @param indexSettings the index settings
-         * @param directory the underlying Lucene directory
-         * @param shardLock the shard lock
-         * @param onClose callback to execute when the store is closed
-         * @param shardPath the path information for the shard
-         * @param directoryFactory the directory factory to create child level directory.
-         *                         Used for Context Aware Segments enabled indices.
+         * @param directoryFactory the directory factory
+         * @param nativeStoreRepository the native object store repository
          * @return a new SubdirectoryAwareStore instance
          */
         @Override
@@ -103,9 +81,19 @@ public class SubdirectoryStorePlugin extends Plugin implements IndexStorePlugin 
             ShardLock shardLock,
             Store.OnClose onClose,
             ShardPath shardPath,
-            DirectoryFactory directoryFactory
+            DirectoryFactory directoryFactory,
+            NativeStoreRepository nativeStoreRepository
         ) {
-            return new SubdirectoryAwareStore(shardId, indexSettings, directory, shardLock, onClose, shardPath, directoryFactory);
+            return new SubdirectoryAwareStore(
+                shardId,
+                indexSettings,
+                directory,
+                shardLock,
+                onClose,
+                shardPath,
+                directoryFactory,
+                nativeStoreRepository
+            );
         }
     }
 }

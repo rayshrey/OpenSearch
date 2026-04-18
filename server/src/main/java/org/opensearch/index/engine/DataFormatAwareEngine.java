@@ -32,6 +32,7 @@ import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
+import org.opensearch.plugins.NativeStoreHandle;
 import org.opensearch.index.engine.dataformat.RefreshInput;
 import org.opensearch.index.engine.dataformat.RefreshResult;
 import org.opensearch.index.engine.dataformat.WriteResult;
@@ -137,6 +138,9 @@ public class DataFormatAwareEngine implements Indexer {
     private final IndexingThrottler throttle;
     private final AtomicInteger throttleRequestCount = new AtomicInteger();
 
+    // Native object store handle for this shard (owned, closed in closeNoLock)
+    private final NativeStoreHandle shardNativeStore;
+
     // Timestamps and seq-no markers
     private final AtomicLong maxUnsafeAutoIdTimestamp = new AtomicLong(-1);
     private final AtomicLong maxSeenAutoIdTimestamp = new AtomicLong(-1);
@@ -208,17 +212,22 @@ public class DataFormatAwareEngine implements Indexer {
 
             // Move to data format aware writers and readers.
             DataFormatRegistry registry = engineConfig.getDataFormatRegistry();
-            // Create indexing engine
-            // Pass committer here as well.
+            DataFormat format = registry.format(config().getIndexSettings().pluggableDataFormat());
+
+            // Plugin creates shard-scoped native store from the Store's repository reference
+            this.shardNativeStore = registry.createNativeStore(format, config().getStore());
+
+            // Create indexing engine with the native store handle
             this.indexingExecutionEngine = registry.getIndexingEngine(
                 new IndexingEngineConfig(
                     committer,
                     config().getMapperService(),
                     config().getIndexSettings(),
                     config().getStore(),
-                    registry
+                    registry,
+                    shardNativeStore
                 ),
-                registry.format(config().getIndexSettings().pluggableDataFormat())
+                format
             );
             this.writerGenerationCounter = new AtomicLong(1L);// committer.getCommitStats().getGeneration());
             this.writerPool = new LockablePool<>(
@@ -233,7 +242,8 @@ public class DataFormatAwareEngine implements Indexer {
                 Optional.ofNullable(indexingExecutionEngine.getProvider()),
                 engineConfig.getMapperService(),
                 engineConfig.getIndexSettings(),
-                store.shardPath()
+                store.shardPath(),
+                shardNativeStore
             );
 
             this.lastRefreshedCheckpointListener = new LastRefreshedCheckpointListener(localCheckpointTracker);
@@ -1015,6 +1025,7 @@ public class DataFormatAwareEngine implements Indexer {
             } catch (Exception e) {
                 logger.warn("failed to close engine resources", e);
             } finally {
+                shardNativeStore.close();
                 try {
                     store.decRef();
                     logger.debug("engine closed [{}]", reason);

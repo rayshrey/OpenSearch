@@ -89,6 +89,7 @@ import org.opensearch.env.NodeEnvironment;
 import org.opensearch.env.ShardLock;
 import org.opensearch.env.ShardLockObtainFailedException;
 import org.opensearch.index.BucketedCompositeDirectory;
+import org.opensearch.repositories.NativeStoreRepository;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.CombinedDeletionPolicy;
 import org.opensearch.index.engine.Engine;
@@ -186,6 +187,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     private final boolean isParentFieldEnabledVersion;
     private final boolean isIndexSortEnabled;
     private final IndexStorePlugin.DirectoryFactory directoryFactory;
+    private final NativeStoreRepository nativeStoreRepository;
 
     // used to ref count files when a new Reader is opened for PIT/Scroll queries
     // prevents segment files deletion until the PIT/Scroll expires or is discarded
@@ -199,7 +201,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     };
 
     public Store(ShardId shardId, IndexSettings indexSettings, Directory directory, ShardLock shardLock) {
-        this(shardId, indexSettings, directory, shardLock, OnClose.EMPTY, null, null);
+        this(shardId, indexSettings, directory, shardLock, OnClose.EMPTY, null, null, NativeStoreRepository.EMPTY);
     }
 
     public Store(
@@ -210,7 +212,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         OnClose onClose,
         ShardPath shardPath
     ) {
-        this(shardId, indexSettings, directory, shardLock, onClose, shardPath, null);
+        this(shardId, indexSettings, directory, shardLock, onClose, shardPath, null, NativeStoreRepository.EMPTY);
     }
 
     public Store(
@@ -221,6 +223,19 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         OnClose onClose,
         ShardPath shardPath,
         IndexStorePlugin.DirectoryFactory directoryFactory
+    ) {
+        this(shardId, indexSettings, directory, shardLock, onClose, shardPath, directoryFactory, NativeStoreRepository.EMPTY);
+    }
+
+    public Store(
+        ShardId shardId,
+        IndexSettings indexSettings,
+        Directory directory,
+        ShardLock shardLock,
+        OnClose onClose,
+        ShardPath shardPath,
+        IndexStorePlugin.DirectoryFactory directoryFactory,
+        NativeStoreRepository nativeStoreRepository
     ) {
         super(shardId, indexSettings);
         final TimeValue refreshInterval = indexSettings.getValue(INDEX_STORE_STATS_REFRESH_INTERVAL_SETTING);
@@ -233,10 +248,21 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         this.isIndexSortEnabled = indexSettings.getIndexSortConfig().hasIndexSort();
         this.isParentFieldEnabledVersion = indexSettings.getIndexVersionCreated().onOrAfter(org.opensearch.Version.V_3_2_0);
         this.directoryFactory = directoryFactory;
+        this.nativeStoreRepository = nativeStoreRepository != null ? nativeStoreRepository : NativeStoreRepository.EMPTY;
 
         assert onClose != null;
         assert shardLock != null;
         assert shardLock.getShardId().equals(shardId);
+    }
+
+    /**
+     * Returns the native (Rust) object store repository for this shard's storage backend.
+     * Returns {@link NativeStoreRepository#EMPTY} if no native store is configured.
+     *
+     * @return the native store repository, never null
+     */
+    public NativeStoreRepository getNativeStoreRepository() {
+        return nativeStoreRepository;
     }
 
     public Directory directory() {

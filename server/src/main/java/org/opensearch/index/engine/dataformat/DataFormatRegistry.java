@@ -16,6 +16,8 @@ import org.opensearch.index.engine.exec.commit.IndexStoreProvider;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.FormatChecksumStrategy;
+import org.opensearch.index.store.Store;
+import org.opensearch.plugins.NativeStoreHandle;
 import org.opensearch.plugins.PluginsService;
 import org.opensearch.plugins.SearchBackEndPlugin;
 
@@ -109,6 +111,22 @@ public class DataFormatRegistry {
     }
 
     /**
+     * Creates a shard-scoped native object store handle for the given data format.
+     * Delegates to {@link DataFormatPlugin#createNativeStore(Store)}.
+     *
+     * @param format the data format
+     * @param store the shard's store (carries ShardPath and NativeStoreRepository)
+     * @return a live handle, or {@link NativeStoreHandle#EMPTY} if not supported
+     */
+    public NativeStoreHandle createNativeStore(DataFormat format, Store store) {
+        DataFormatPlugin plugin = dataFormatPluginRegistry.get(format);
+        if (plugin == null) {
+            return NativeStoreHandle.EMPTY;
+        }
+        return plugin.createNativeStore(store);
+    }
+
+    /**
      * Returns all registered data formats that support a specific capability for a field type.
      *
      * @param fieldType the field type name
@@ -174,13 +192,14 @@ public class DataFormatRegistry {
         Optional<IndexStoreProvider> indexStoreProvider,
         MapperService mapperService,
         IndexSettings indexSettings,
-        ShardPath shardPath
+        ShardPath shardPath,
+        NativeStoreHandle nativeStoreHandle
     ) throws IOException {
         // TODO: Filter based on index settings
         Map<DataFormat, EngineReaderManager<?>> readerManagers = new HashMap<>();
         for (Map.Entry<DataFormat, CheckedFunction<ReaderManagerConfig, EngineReaderManager<?>, IOException>> entry : readerManagerBuilders
             .entrySet()) {
-            ReaderManagerConfig settings = new ReaderManagerConfig(indexStoreProvider, entry.getKey(), shardPath);
+            ReaderManagerConfig settings = new ReaderManagerConfig(indexStoreProvider, entry.getKey(), shardPath, nativeStoreHandle);
             readerManagers.put(entry.getKey(), entry.getValue().apply(settings));
         }
         return readerManagers;

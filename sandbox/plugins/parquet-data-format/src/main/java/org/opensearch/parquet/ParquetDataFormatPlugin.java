@@ -26,9 +26,11 @@ import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.index.store.PrecomputedChecksumStrategy;
+import org.opensearch.index.store.Store;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
 import org.opensearch.parquet.fields.ArrowSchemaBuilder;
+import org.opensearch.plugins.NativeStoreHandle;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
@@ -96,6 +98,40 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin 
     @Override
     public DataFormat getDataFormat() {
         return dataFormat;
+    }
+
+    @Override
+    public NativeStoreHandle createNativeStore(Store store) {
+        // Phase 2 implementation outline:
+        //
+        // 1. Get the repository-level native store from the Store
+        //    NativeStoreRepository repoStore = store.getNativeStoreRepository();
+        //
+        // 2. If a repository-level native store exists (remote-backed index),
+        //    create a PrefixObjectStore scoped to this shard's path within the repository.
+        //    This ensures the shard can only access its own files.
+        //    if (repoStore.isLive()) {
+        //        String shardPrefix = "indices/" + indexUUID + "/" + shardId + "/parquet/";
+        //        long scopedPtr = RustBridge.createScopedStore(repoStore.getPointer(), shardPrefix);
+        //        return new NativeStoreHandle(scopedPtr, RustBridge::destroyStore);
+        //    }
+        //
+        // 3. Otherwise (local-only index), create a LocalFileSystem ObjectStore
+        //    rooted at the shard's data path.
+        //    long localPtr = RustBridge.createLocalStore(store.shardPath().getDataPath().toString());
+        //    if (localPtr <= 0) return NativeStoreHandle.EMPTY;
+        //    return new NativeStoreHandle(localPtr, RustBridge::destroyStore);
+        //
+        // TODO: Implement RustBridge.createLocalStore(String rootPath) — FFM call to
+        //       parquet_create_local_store which creates LocalFileSystem::new_with_prefix(root)
+        // TODO: Implement RustBridge.createScopedStore(long parentHandle, String prefix) — FFM call to
+        //       parquet_create_scoped_store which creates PrefixStore wrapping the parent store
+        // TODO: Implement RustBridge.destroyStore(long handle) — FFM call to
+        //       parquet_destroy_store which drops the Arc<dyn ObjectStore>
+        // TODO: Implement Rust object_store_handle.rs with create_local_store, create_scoped_store, drop_store
+        // TODO: Add FFM exports in ffm.rs for the above functions
+
+        return NativeStoreHandle.EMPTY;
     }
 
     @Override

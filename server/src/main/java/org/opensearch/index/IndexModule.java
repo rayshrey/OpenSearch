@@ -101,6 +101,7 @@ import org.opensearch.indices.mapper.MapperRegistry;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RecoveryState;
 import org.opensearch.plugins.IndexStorePlugin;
+import org.opensearch.repositories.NativeStoreRepository;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
 import org.opensearch.search.aggregations.support.ValuesSourceRegistry;
@@ -1134,22 +1135,20 @@ public final class IndexModule {
                     Directory directory,
                     ShardLock shardLock,
                     Store.OnClose onClose,
-                    ShardPath shardPath
-                ) throws IOException {
-                    return new Store(shardId, indexSettings, directory, shardLock, onClose, shardPath);
-                }
-
-                @Override
-                public Store newStore(
-                    ShardId shardId,
-                    IndexSettings indexSettings,
-                    Directory directory,
-                    ShardLock shardLock,
-                    Store.OnClose onClose,
                     ShardPath shardPath,
-                    IndexStorePlugin.DirectoryFactory directoryFactory
+                    IndexStorePlugin.DirectoryFactory directoryFactory,
+                    NativeStoreRepository nativeStoreRepository
                 ) throws IOException {
-                    return new Store(shardId, indexSettings, directory, shardLock, onClose, shardPath, directoryFactory);
+                    return new Store(
+                        shardId,
+                        indexSettings,
+                        directory,
+                        shardLock,
+                        onClose,
+                        shardPath,
+                        directoryFactory,
+                        nativeStoreRepository
+                    );
                 }
             };
         }

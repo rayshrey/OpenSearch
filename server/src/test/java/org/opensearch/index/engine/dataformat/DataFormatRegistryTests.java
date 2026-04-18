@@ -19,6 +19,7 @@ import org.opensearch.index.engine.dataformat.stub.MockSearchBackEndPlugin;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.plugins.NativeStoreHandle;
 import org.opensearch.plugins.PluginsService;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.test.OpenSearchTestCase;
@@ -146,7 +147,7 @@ public class DataFormatRegistryTests extends OpenSearchTestCase {
         DataFormatRegistry registry = new DataFormatRegistry(pluginsService);
 
         IndexingExecutionEngine<?, ?> engine = registry.getIndexingEngine(
-            new IndexingEngineConfig(null, mapperService, indexSettings, null, null),
+            new IndexingEngineConfig(null, mapperService, indexSettings, null, null, NativeStoreHandle.EMPTY),
             format
         );
         assertNotNull(engine);
@@ -162,7 +163,10 @@ public class DataFormatRegistryTests extends OpenSearchTestCase {
 
         IllegalArgumentException e = expectThrows(
             IllegalArgumentException.class,
-            () -> registry.getIndexingEngine(new IndexingEngineConfig(null, mapperService, indexSettings, null, null), unregistered)
+            () -> registry.getIndexingEngine(
+                new IndexingEngineConfig(null, mapperService, indexSettings, null, null, NativeStoreHandle.EMPTY),
+                unregistered
+            )
         );
         assertTrue(e.getMessage().contains("unknown"));
     }
@@ -271,7 +275,8 @@ public class DataFormatRegistryTests extends OpenSearchTestCase {
             Optional.empty(),
             mapperService,
             indexSettings,
-            shardPath
+            shardPath,
+            NativeStoreHandle.EMPTY
         );
         assertEquals(1, managers.size());
         assertNotNull(managers.get(format));

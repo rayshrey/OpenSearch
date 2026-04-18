@@ -117,7 +117,9 @@ import org.opensearch.indices.replication.checkpoint.ReferencedSegmentsPublisher
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
 import org.opensearch.node.remotestore.RemoteStoreNodeAttribute;
 import org.opensearch.plugins.IndexStorePlugin;
+import org.opensearch.repositories.NativeStoreRepository;
 import org.opensearch.repositories.RepositoriesService;
+import org.opensearch.repositories.RepositoryMissingException;
 import org.opensearch.script.ScriptService;
 import org.opensearch.search.aggregations.support.ValuesSourceRegistry;
 import org.opensearch.threadpool.ThreadPool;
@@ -790,7 +792,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 lock,
                 new StoreCloseListener(shardId, () -> eventListener.onStoreClosed(shardId)),
                 path,
-                directoryFactory
+                directoryFactory,
+                resolveNativeStoreRepository(repositoriesService)
             );
             eventListener.onStoreCreated(shardId);
             indexShard = new IndexShard(
@@ -1351,6 +1354,23 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
 
         logger.debug("No DataFormatAwareStoreDirectoryFactory available, Store will handle internal creation for: {}", shardPath);
         return null;
+    }
+
+    /**
+     * Resolves the native (Rust) object store repository for this index, if available.
+     * For indices with a configured remote store repository, returns the repository's
+     * native store. Otherwise returns {@link NativeStoreRepository#EMPTY}.
+     */
+    private NativeStoreRepository resolveNativeStoreRepository(RepositoriesService repositoriesService) {
+        String repoName = this.indexSettings.getRemoteStoreRepository();
+        if (repoName != null) {
+            try {
+                return repositoriesService.repository(repoName).getNativeStore();
+            } catch (RepositoryMissingException e) {
+                logger.warn("Native store not available for repository [{}]", repoName);
+            }
+        }
+        return NativeStoreRepository.EMPTY;
     }
 
     private void updateFsyncTaskIfNecessary() {

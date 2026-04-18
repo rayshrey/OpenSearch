@@ -11,6 +11,8 @@ package org.opensearch.index.engine.dataformat;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.store.FormatChecksumStrategy;
+import org.opensearch.index.store.Store;
+import org.opensearch.plugins.NativeStoreHandle;
 
 import java.util.Map;
 
@@ -53,5 +55,25 @@ public interface DataFormatPlugin {
      */
     default Map<String, DataFormatDescriptor> getFormatDescriptors(IndexSettings indexSettings, DataFormatRegistry dataFormatRegistry) {
         return Map.of();
+    }
+
+    /**
+     * Creates a shard-scoped native object store handle for this data format.
+     * Called once per shard at engine creation time. The returned handle is
+     * shared between the indexing engine (writes) and reader managers (reads).
+     *
+     * <p>The {@link Store} provides access to the shard path and the repository-level
+     * {@link org.opensearch.repositories.NativeStoreRepository} (via
+     * {@link Store#getNativeStoreRepository()}) for scoping.
+     *
+     * <p>The default implementation returns {@link NativeStoreHandle#EMPTY}.
+     * Data format plugins that use native (Rust) object stores for I/O should
+     * override this method.
+     *
+     * @param store the shard's store with shard path and native store repository
+     * @return a live handle, or {@link NativeStoreHandle#EMPTY} if not supported
+     */
+    default NativeStoreHandle createNativeStore(Store store) {
+        return NativeStoreHandle.EMPTY;
     }
 }
