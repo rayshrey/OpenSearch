@@ -288,6 +288,11 @@ public class CompositeIndexingExecutionEngineTests extends OpenSearchTestCase {
 
             @Override
             public void deleteCommit(org.opensearch.index.engine.exec.coord.CatalogSnapshot snapshot) {}
+
+            @Override
+            public boolean isCommitManagedFile(String fileName) {
+                return false;
+            }
         };
 
         Map<String, DataFormatPlugin> plugins = new HashMap<>();
@@ -356,6 +361,11 @@ public class CompositeIndexingExecutionEngineTests extends OpenSearchTestCase {
 
             @Override
             public void deleteCommit(org.opensearch.index.engine.exec.coord.CatalogSnapshot snapshot) {}
+
+            @Override
+            public boolean isCommitManagedFile(String fileName) {
+                return false;
+            }
         };
 
         Map<String, DataFormatPlugin> plugins = new HashMap<>();
@@ -427,6 +437,11 @@ public class CompositeIndexingExecutionEngineTests extends OpenSearchTestCase {
 
         @Override
         public void deleteCommit(org.opensearch.index.engine.exec.coord.CatalogSnapshot snapshot) {}
+
+        @Override
+        public boolean isCommitManagedFile(String fileName) {
+            return false;
+        }
     }
 
     private IndexSettings createIndexSettings(String primaryFormat) {

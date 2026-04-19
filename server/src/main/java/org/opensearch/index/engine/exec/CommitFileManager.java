@@ -33,10 +33,12 @@ public interface CommitFileManager {
     /**
      * Returns true if the given file is managed by the commit mechanism
      * (e.g., segments_N, write.lock) and should not be treated as an orphan.
+     * <p>
+     * Implementations MUST return true for all files they manage. Returning false
+     * for a commit-managed file will cause {@code IndexFileDeleter} to treat it
+     * as an orphan and delete it on startup, leading to data loss.
      *
      * @param fileName the file name to check
      */
-    default boolean isCommitManagedFile(String fileName) {
-        return false;
-    }
+    boolean isCommitManagedFile(String fileName);
 }

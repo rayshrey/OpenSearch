@@ -87,6 +87,11 @@ public class SafeBootstrapCommitterTests extends OpenSearchTestCase {
         public void deleteCommit(CatalogSnapshot snapshot) {}
 
         @Override
+        public boolean isCommitManagedFile(String fileName) {
+            return false;
+        }
+
+        @Override
         public void close() {}
     }
 

@@ -55,6 +55,11 @@ public class DataFormatAwareEngineCommitterTests extends OpenSearchTestCase {
 
             @Override
             public void deleteCommit(org.opensearch.index.engine.exec.coord.CatalogSnapshot snapshot) {}
+
+            @Override
+            public boolean isCommitManagedFile(String fileName) {
+                return false;
+            }
         };
         engine.setCommitter(committer);
         assertSame(committer, engine.getCommitter());

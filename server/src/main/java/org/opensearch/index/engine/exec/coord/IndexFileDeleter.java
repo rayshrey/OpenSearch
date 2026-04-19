@@ -17,10 +17,8 @@ import org.opensearch.index.engine.exec.FileDeleter;
 import org.opensearch.index.engine.exec.FilesListener;
 import org.opensearch.index.shard.ShardPath;
 
+import java.io.Closeable;
 import java.io.IOException;
-import java.nio.file.DirectoryStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -51,7 +49,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class IndexFileDeleter {
+public class IndexFileDeleter implements Closeable {
 
     private static final Logger logger = LogManager.getLogger(IndexFileDeleter.class);
 
@@ -61,6 +59,13 @@ public class IndexFileDeleter {
     private final Map<String, FilesListener> filesListeners;
     private final List<CatalogSnapshot> committedSnapshots;
     private final CommitFileManager commitFileManager;
+
+    /**
+     * Files that were dereferenced (ref count hit 0) but whose physical deletion
+     * failed. Retried on the next {@link #removeFileReferences}, {@link #revisitPolicy},
+     * or {@link #retryPendingDeletes} call.
+     */
+    private final Map<String, Set<String>> pendingDeletes;
 
     public IndexFileDeleter(
         CatalogSnapshotDeletionPolicy deletionPolicy,
@@ -76,6 +81,7 @@ public class IndexFileDeleter {
         this.fileRefCounts = new HashMap<>();
         this.committedSnapshots = new ArrayList<>();
         this.commitFileManager = commitFileManager;
+        this.pendingDeletes = new HashMap<>();
 
         for (CatalogSnapshot cs : initialCommittedSnapshots) {
             if (cs.tryIncRef() == false) {
@@ -85,9 +91,12 @@ public class IndexFileDeleter {
             addFileReferences(cs);
         }
 
+        // No synchronization needed — `this` hasn't escaped the constructor yet.
         List<CatalogSnapshot> toDelete = deletionPolicy.onInit(committedSnapshots);
         for (CatalogSnapshot old : toDelete) {
             committedSnapshots.remove(old);
+        }
+        for (CatalogSnapshot old : toDelete) {
             if (old.decRef()) {
                 removeFileReferences(old);
             }
@@ -105,7 +114,7 @@ public class IndexFileDeleter {
      * @return files whose ref count went from 0 to 1 (newly visible), grouped by format name
      */
     public synchronized Map<String, Collection<String>> addFileReferences(CatalogSnapshot snapshot) throws IOException {
-        Map<String, Collection<String>> segregated = segregateFilesByFormat(snapshot);
+        Map<String, Collection<String>> segregated = snapshot.getFilesByFormat();
         Map<String, Collection<String>> newFiles = new HashMap<>();
 
         for (Map.Entry<String, Collection<String>> entry : segregated.entrySet()) {
@@ -117,6 +126,14 @@ public class IndexFileDeleter {
                 AtomicInteger refCount = formatRefs.computeIfAbsent(file, k -> new AtomicInteger(0));
                 if (refCount.incrementAndGet() == 1) {
                     added.add(file);
+                    // File is live again — remove from pending deletes if present
+                    Set<String> pending = pendingDeletes.get(formatName);
+                    if (pending != null) {
+                        pending.remove(file);
+                        if (pending.isEmpty()) {
+                            pendingDeletes.remove(formatName);
+                        }
+                    }
                 }
             }
             if (added.isEmpty() == false) {
@@ -130,19 +147,27 @@ public class IndexFileDeleter {
     /**
      * Called when a CatalogSnapshot's refCount reaches 0.
      * Decrements ref counts for its files and deletes files that hit 0.
+     * <p>
+     * Ref count bookkeeping is done under the lock; actual I/O (commit deletion,
+     * file deletion, listener notification) is performed outside the lock to avoid
+     * blocking concurrent {@link #addFileReferences} and {@link #onCommit} calls.
      */
-    public synchronized void removeFileReferences(CatalogSnapshot snapshot) throws IOException {
-        Map<String, Collection<String>> filesToDelete = decRefFiles(snapshot);
+    public void removeFileReferences(CatalogSnapshot snapshot) throws IOException {
+        Map<String, Collection<String>> filesToDelete;
+        synchronized (this) {
+            filesToDelete = decRefFiles(snapshot);
+        }
         // Delete the commit point (segments_N) BEFORE deleting data files,
         // because deleteCommit may call DirectoryReader.listCommits() which
         // needs to read segment files that are about to be deleted.
         if (commitFileManager != null) {
             commitFileManager.deleteCommit(snapshot);
-        } else {}
-        if (filesToDelete.isEmpty() == false) {
-            deleteFiles(filesToDelete);
-            notifyFilesDeleted(filesToDelete);
         }
+        if (filesToDelete.isEmpty() == false) {
+            executeDeletesWithRetry(filesToDelete);
+        }
+        // Also retry any previously failed deletes
+        retryPendingDeletes();
     }
 
     // ---- Commit path ----
@@ -154,16 +179,20 @@ public class IndexFileDeleter {
      * Snapshots the policy wants to delete get their commit ref decRef'd,
      * which may trigger removeFileReferences when their refCount reaches 0.
      */
-    public synchronized void onCommit(CatalogSnapshot committedSnapshot) throws IOException {
-        committedSnapshots.add(committedSnapshot);
-
-        List<CatalogSnapshot> toDelete = deletionPolicy.onCommit(committedSnapshots);
+    public void onCommit(CatalogSnapshot committedSnapshot) throws IOException {
+        List<CatalogSnapshot> toDelete;
+        synchronized (this) {
+            committedSnapshots.add(committedSnapshot);
+            toDelete = deletionPolicy.onCommit(committedSnapshots);
+            for (CatalogSnapshot old : toDelete) {
+                committedSnapshots.remove(old);
+            }
+        }
 
         for (CatalogSnapshot old : toDelete) {
-            committedSnapshots.remove(old);
             if (old.decRef()) {
                 removeFileReferences(old);
-            } else {}
+            }
         }
     }
 
@@ -174,26 +203,105 @@ public class IndexFileDeleter {
      * Used after releasing a snapshot hold — the policy may now allow
      * deletion of commits it previously protected.
      */
-    public synchronized void revisitPolicy() throws IOException {
-        List<CatalogSnapshot> toDelete = deletionPolicy.onCommit(committedSnapshots);
+    public void revisitPolicy() throws IOException {
+        List<CatalogSnapshot> toDelete;
+        synchronized (this) {
+            toDelete = deletionPolicy.onCommit(committedSnapshots);
+            for (CatalogSnapshot old : toDelete) {
+                committedSnapshots.remove(old);
+            }
+        }
         for (CatalogSnapshot old : toDelete) {
-            committedSnapshots.remove(old);
             if (old.decRef()) {
                 removeFileReferences(old);
             }
         }
     }
 
-    // ---- Listener notification ----
-
-    private void deleteFiles(Map<String, Collection<String>> filesByFormat) throws IOException {
-        for (Map.Entry<String, Collection<String>> entry : filesByFormat.entrySet()) {
-            FileDeleter deleter = fileDeleters.get(entry.getKey());
-            if (deleter != null) {
-                deleter.deleteFiles(Map.of(entry.getKey(), entry.getValue()));
+    /**
+     * Retries deletion of files that failed to delete on a previous attempt.
+     * Can be called periodically or after operations that may have released
+     * filesystem locks.
+     */
+    public void retryPendingDeletes() throws IOException {
+        Map<String, Set<String>> snapshot;
+        synchronized (this) {
+            if (pendingDeletes.isEmpty()) {
+                return;
+            }
+            // Take a snapshot of pending deletes to process outside the lock
+            snapshot = new HashMap<>();
+            for (Map.Entry<String, Set<String>> entry : pendingDeletes.entrySet()) {
+                snapshot.put(entry.getKey(), new HashSet<>(entry.getValue()));
             }
         }
+        for (Map.Entry<String, Set<String>> entry : snapshot.entrySet()) {
+            String formatName = entry.getKey();
+            Set<String> files = entry.getValue();
+            FileDeleter deleter = fileDeleters.get(formatName);
+            if (deleter == null) {
+                continue;
+            }
+            Set<String> stillFailed = new HashSet<>();
+            for (String file : files) {
+                // Re-check: skip if file was re-referenced since we snapshotted pendingDeletes
+                boolean isLive;
+                synchronized (this) {
+                    Map<String, AtomicInteger> formatRefs = fileRefCounts.get(formatName);
+                    isLive = formatRefs != null && formatRefs.containsKey(file);
+                    if (isLive) {
+                        // Remove from pending — addFileReferences should have done this,
+                        // but guard against edge cases
+                        Set<String> pending = pendingDeletes.get(formatName);
+                        if (pending != null) {
+                            pending.remove(file);
+                            if (pending.isEmpty()) {
+                                pendingDeletes.remove(formatName);
+                            }
+                        }
+                    }
+                }
+                if (isLive) {
+                    continue;
+                }
+                try {
+                    deleter.deleteFiles(Map.of(formatName, List.of(file)));
+                } catch (IOException e) {
+                    logger.warn("Retry delete failed for [{}] in format [{}]", file, formatName, e);
+                    stillFailed.add(file);
+                }
+            }
+            synchronized (this) {
+                Set<String> currentPending = pendingDeletes.get(formatName);
+                if (currentPending != null) {
+                    // Remove successfully deleted files
+                    currentPending.retainAll(stillFailed);
+                    if (currentPending.isEmpty()) {
+                        pendingDeletes.remove(formatName);
+                    }
+                }
+            }
+        }
+        // Notify listeners for files that were successfully deleted in retry
+        Map<String, Collection<String>> deleted = new HashMap<>();
+        for (Map.Entry<String, Set<String>> entry : snapshot.entrySet()) {
+            synchronized (this) {
+                Set<String> currentPending = pendingDeletes.get(entry.getKey());
+                Set<String> succeeded = new HashSet<>(entry.getValue());
+                if (currentPending != null) {
+                    succeeded.removeAll(currentPending);
+                }
+                if (succeeded.isEmpty() == false) {
+                    deleted.put(entry.getKey(), succeeded);
+                }
+            }
+        }
+        if (deleted.isEmpty() == false) {
+            notifyFilesDeleted(deleted);
+        }
     }
+
+    // ---- Listener notification (outside lock) ----
 
     private void notifyFilesAdded(Map<String, Collection<String>> newFilesByFormat) throws IOException {
         for (Map.Entry<String, Collection<String>> entry : newFilesByFormat.entrySet()) {
@@ -213,10 +321,59 @@ public class IndexFileDeleter {
         }
     }
 
+    // ---- Deletion with pending-delete tracking ----
+
+    /**
+     * Attempts to delete files. Before deleting, re-checks under the lock that each file
+     * is still unreferenced — a concurrent {@link #addFileReferences} may have re-referenced
+     * a file between {@link #decRefFiles} and this call. Files that fail to delete are added
+     * to {@link #pendingDeletes} for retry. Successfully deleted files trigger listener notification.
+     */
+    private void executeDeletesWithRetry(Map<String, Collection<String>> filesByFormat) throws IOException {
+        // Filter out files that were re-referenced since decRefFiles ran
+        Map<String, Collection<String>> safeToDelete = new HashMap<>();
+        synchronized (this) {
+            for (Map.Entry<String, Collection<String>> entry : filesByFormat.entrySet()) {
+                String formatName = entry.getKey();
+                Map<String, AtomicInteger> formatRefs = fileRefCounts.get(formatName);
+                Collection<String> stillDead = new HashSet<>();
+                for (String file : entry.getValue()) {
+                    if (formatRefs == null || formatRefs.containsKey(file) == false) {
+                        stillDead.add(file);
+                    }
+                }
+                if (stillDead.isEmpty() == false) {
+                    safeToDelete.put(formatName, stillDead);
+                }
+            }
+        }
+        Map<String, Collection<String>> successfullyDeleted = new HashMap<>();
+        for (Map.Entry<String, Collection<String>> entry : safeToDelete.entrySet()) {
+            String formatName = entry.getKey();
+            Collection<String> files = entry.getValue();
+            FileDeleter deleter = fileDeleters.get(formatName);
+            if (deleter != null) {
+                try {
+                    deleter.deleteFiles(Map.of(formatName, files));
+                    successfullyDeleted.put(formatName, files);
+                } catch (IOException e) {
+                    logger.warn("Failed to delete files for format [{}], adding to pending deletes", formatName, e);
+                    synchronized (this) {
+                        pendingDeletes.computeIfAbsent(formatName, k -> new HashSet<>()).addAll(files);
+                    }
+                }
+            }
+        }
+        if (successfullyDeleted.isEmpty() == false) {
+            notifyFilesDeleted(successfullyDeleted);
+        }
+    }
+
     // ---- Internal ----
 
     private Map<String, Collection<String>> decRefFiles(CatalogSnapshot snapshot) {
-        Map<String, Collection<String>> segregated = segregateFilesByFormat(snapshot);
+        assert Thread.holdsLock(this);
+        Map<String, Collection<String>> segregated = snapshot.getFilesByFormat();
         Map<String, Collection<String>> filesToDelete = new HashMap<>();
 
         for (Map.Entry<String, Collection<String>> entry : segregated.entrySet()) {
@@ -240,45 +397,56 @@ public class IndexFileDeleter {
         return filesToDelete;
     }
 
-    private Map<String, Collection<String>> segregateFilesByFormat(CatalogSnapshot snapshot) {
-        Map<String, Collection<String>> result = new HashMap<>();
-        for (var segment : snapshot.getSegments()) {
-            for (var entry : segment.dfGroupedSearchableFiles().entrySet()) {
-                result.computeIfAbsent(entry.getKey(), k -> new HashSet<>()).addAll(entry.getValue().files());
-            }
+    /**
+     * Scans format directories for files not tracked by any snapshot and deletes them.
+     * Called once during construction to clean up after a crash between ref-count
+     * decrement and physical deletion.
+     */
+    private void deleteOrphanedFiles(ShardPath shardPath) throws IOException {
+        Map<String, Set<String>> knownFilesByFormat = new HashMap<>();
+        for (Map.Entry<String, Map<String, AtomicInteger>> entry : fileRefCounts.entrySet()) {
+            knownFilesByFormat.put(entry.getKey(), new HashSet<>(entry.getValue().keySet()));
         }
-        return result;
+        Map<String, Collection<String>> orphans = OrphanFileScanner.findOrphans(shardPath, knownFilesByFormat, commitFileManager);
+        if (orphans.isEmpty() == false) {
+            executeDeletesWithRetry(orphans);
+        }
     }
 
-    private void deleteOrphanedFiles(ShardPath shardPath) throws IOException {
-        if (shardPath == null) {
-            return;
+    /**
+     * Returns true if there are files awaiting deletion retry.
+     * Visible for testing.
+     */
+    public synchronized boolean hasPendingDeletes() {
+        return pendingDeletes.isEmpty() == false;
+    }
+
+    /**
+     * Returns a snapshot of the current pending deletes map.
+     * Visible for testing.
+     */
+    synchronized Map<String, Set<String>> getPendingDeletes() {
+        Map<String, Set<String>> copy = new HashMap<>();
+        for (Map.Entry<String, Set<String>> entry : pendingDeletes.entrySet()) {
+            copy.put(entry.getKey(), new HashSet<>(entry.getValue()));
         }
-        Map<String, Collection<String>> orphansByFormat = new HashMap<>();
-        for (Map.Entry<String, Map<String, AtomicInteger>> entry : fileRefCounts.entrySet()) {
-            String formatName = entry.getKey();
-            Set<String> knownFiles = entry.getValue().keySet();
-            Path formatDir = "lucene".equals(formatName) ? shardPath.resolveIndex() : shardPath.getDataPath().resolve(formatName);
-            if (Files.exists(formatDir) == false) {
-                continue;
-            }
-            Collection<String> orphans = new HashSet<>();
-            try (DirectoryStream<Path> stream = Files.newDirectoryStream(formatDir)) {
-                for (Path file : stream) {
-                    String fileName = file.getFileName().toString();
-                    if (Files.isRegularFile(file)
-                        && knownFiles.contains(fileName) == false
-                        && (commitFileManager == null || commitFileManager.isCommitManagedFile(fileName) == false)) {
-                        orphans.add(fileName);
-                    }
-                }
-            }
-            if (orphans.isEmpty() == false) {
-                orphansByFormat.put(formatName, orphans);
-            }
+        return copy;
+    }
+
+    /**
+     * Releases all committed snapshot refs held by this deleter and drains pending deletes.
+     * Should be called during engine shutdown to prevent ref leaks.
+     */
+    @Override
+    public void close() throws IOException {
+        List<CatalogSnapshot> snapshotsToRelease;
+        synchronized (this) {
+            snapshotsToRelease = new ArrayList<>(committedSnapshots);
+            committedSnapshots.clear();
+            pendingDeletes.clear();
         }
-        if (orphansByFormat.isEmpty() == false) {
-            deleteFiles(orphansByFormat);
+        for (CatalogSnapshot cs : snapshotsToRelease) {
+            cs.decRef();
         }
     }
 

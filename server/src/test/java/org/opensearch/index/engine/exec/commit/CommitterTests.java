@@ -51,6 +51,11 @@ public class CommitterTests extends OpenSearchTestCase {
 
             @Override
             public void deleteCommit(org.opensearch.index.engine.exec.coord.CatalogSnapshot snapshot) {}
+
+            @Override
+            public boolean isCommitManagedFile(String fileName) {
+                return false;
+            }
         };
     }
 
@@ -91,6 +96,11 @@ public class CommitterTests extends OpenSearchTestCase {
 
             @Override
             public void deleteCommit(org.opensearch.index.engine.exec.coord.CatalogSnapshot snapshot) {}
+
+            @Override
+            public boolean isCommitManagedFile(String fileName) {
+                return false;
+            }
         };
         committer.close();
         assertTrue("close() should have been called", closed.get());
@@ -129,6 +139,11 @@ public class CommitterTests extends OpenSearchTestCase {
 
             @Override
             public void deleteCommit(org.opensearch.index.engine.exec.coord.CatalogSnapshot snapshot) {}
+
+            @Override
+            public boolean isCommitManagedFile(String fileName) {
+                return false;
+            }
         };
         committer.commit(Map.of());
         assertTrue("commit() should have been called", committed.get());
