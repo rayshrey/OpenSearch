@@ -95,8 +95,6 @@ public class IndexFileDeleter implements Closeable {
         List<CatalogSnapshot> toDelete = deletionPolicy.onInit(committedSnapshots);
         for (CatalogSnapshot old : toDelete) {
             committedSnapshots.remove(old);
-        }
-        for (CatalogSnapshot old : toDelete) {
             if (old.decRef()) {
                 removeFileReferences(old);
             }
