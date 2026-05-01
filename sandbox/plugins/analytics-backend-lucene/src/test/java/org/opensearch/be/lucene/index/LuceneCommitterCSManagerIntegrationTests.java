@@ -197,6 +197,22 @@ public class LuceneCommitterCSManagerIntegrationTests extends OpenSearchTestCase
         return Files.exists(dir.resolve(fileName));
     }
 
+    private static FileDeleter compositeFileDeleter(TestEnv env) {
+        return compositeFileDeleter(env.parquetDir(), env.indexDir());
+    }
+
+    private static FileDeleter compositeFileDeleter(Path parquetDir, Path indexDir) {
+        Map<String, FileDeleter> deleters = Map.of(PARQUET_FORMAT, fileDeleterFor(parquetDir), LUCENE_FORMAT, fileDeleterFor(indexDir));
+        return filesToDelete -> {
+            Map<String, Collection<String>> allFailed = new HashMap<>();
+            for (Map.Entry<String, FileDeleter> entry : deleters.entrySet()) {
+                Map<String, Collection<String>> failed = entry.getValue().deleteFiles(filesToDelete);
+                failed.forEach((k, v) -> allFailed.computeIfAbsent(k, x -> new ArrayList<>()).addAll(v));
+            }
+            return allFailed;
+        };
+    }
+
     private int countLuceneCommits(Store store) throws IOException {
         return DirectoryReader.listCommits(store.directory()).size();
     }
@@ -228,7 +244,7 @@ public class LuceneCommitterCSManagerIntegrationTests extends OpenSearchTestCase
         return new CatalogSnapshotManager(
             env.committer.listCommittedSnapshots(),
             policy,
-            Map.of(PARQUET_FORMAT, fileDeleterFor(env.parquetDir), LUCENE_FORMAT, fileDeleterFor(env.indexDir)),
+            compositeFileDeleter(env),
             Map.of(),
             List.of(),
             env.shardPath,
@@ -553,7 +569,7 @@ public class LuceneCommitterCSManagerIntegrationTests extends OpenSearchTestCase
             CatalogSnapshotManager manager = new CatalogSnapshotManager(
                 committer.listCommittedSnapshots(),
                 policy,
-                Map.of(PARQUET_FORMAT, fileDeleterFor(parquetDir), LUCENE_FORMAT, fileDeleterFor(indexDir)),
+                compositeFileDeleter(parquetDir, indexDir),
                 Map.of(),
                 List.of(),
                 shardPath,
@@ -672,7 +688,7 @@ public class LuceneCommitterCSManagerIntegrationTests extends OpenSearchTestCase
             CatalogSnapshotManager manager = new CatalogSnapshotManager(
                 committer.listCommittedSnapshots(),
                 policy,
-                Map.of(PARQUET_FORMAT, fileDeleterFor(parquetDir), LUCENE_FORMAT, fileDeleterFor(indexDir)),
+                compositeFileDeleter(parquetDir, indexDir),
                 Map.of(),
                 List.of(),
                 shardPath,

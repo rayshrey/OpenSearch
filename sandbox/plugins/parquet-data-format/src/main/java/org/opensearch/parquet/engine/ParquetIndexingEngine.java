@@ -237,7 +237,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
         }
         Collection<String> failed = new ArrayList<>();
         for (String fileName : parquetFiles) {
-            Path filePath = Path.of(fileName);
+            Path filePath = shardPath.getDataPath().resolve(dataFormat.name()).resolve(fileName);
             logger.debug("Deleting parquet file: {}", filePath);
             if (Files.deleteIfExists(filePath) == false) {
                 logger.warn("Failed to delete parquet file: {}", filePath);

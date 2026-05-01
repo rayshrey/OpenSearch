@@ -86,7 +86,7 @@ public class CatalogSnapshotManager implements Closeable {
      *
      * @param committedSnapshots   the committed snapshots, ordered oldest first; must not be empty
      * @param deletionPolicy       decides which committed snapshots to keep
-     * @param fileDeleters         per-format deleters for actual file deletion
+     * @param fileDeleter          deleter for actual file deletion
      * @param filesListeners       per-format listeners notified on file add/delete
      * @param snapshotListeners    listeners notified on snapshot deletion
      * @param shardPath            for orphan cleanup on init, or null if not needed
@@ -95,7 +95,7 @@ public class CatalogSnapshotManager implements Closeable {
     public CatalogSnapshotManager(
         List<CatalogSnapshot> committedSnapshots,
         CatalogSnapshotDeletionPolicy deletionPolicy,
-        Map<String, FileDeleter> fileDeleters,
+        FileDeleter fileDeleter,
         Map<String, FilesListener> filesListeners,
         List<CatalogSnapshotLifecycleListener> snapshotListeners,
         ShardPath shardPath,
@@ -112,7 +112,7 @@ public class CatalogSnapshotManager implements Closeable {
         }
         this.indexFileDeleter = new IndexFileDeleter(
             deletionPolicy,
-            fileDeleters,
+            fileDeleter,
             filesListeners,
             committedSnapshots,
             shardPath,
@@ -268,6 +268,7 @@ public class CatalogSnapshotManager implements Closeable {
             throw new IllegalStateException("CatalogSnapshot [gen=" + snapshot.getGeneration() + "] is already closed");
         }
         return new GatedConditionalCloseable<>(snapshot, () -> {
+            snapshot.markCommitted();
             try {
                 indexFileDeleter.onCommit(snapshot);
             } catch (IOException e) {

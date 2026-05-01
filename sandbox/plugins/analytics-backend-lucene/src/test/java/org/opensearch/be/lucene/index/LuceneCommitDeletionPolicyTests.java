@@ -88,4 +88,35 @@ public class LuceneCommitDeletionPolicyTests extends OpenSearchTestCase {
 
         verify(csCommit, never()).delete();
     }
+
+    public void testPurgeCommitIgnoresUntrackedIdAndDoesNotAffectTrackedCommit() throws IOException {
+        LuceneCommitDeletionPolicy policy = new LuceneCommitDeletionPolicy();
+        IndexCommit cs1 = mockCommit(Map.of(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, "b1", CatalogSnapshot.CATALOG_SNAPSHOT_ID, "1"));
+
+        policy.onCommit(List.of(cs1));
+
+        // Purge an ID that was never committed — should be ignored
+        policy.purgeCommit(999L);
+
+        // Purge the real commit
+        policy.purgeCommit(1L);
+        policy.onCommit(List.of(cs1));
+
+        // Only cs1 should be deleted, the unknown ID should not cause issues
+        verify(cs1).delete();
+    }
+
+    public void testPurgeUntrackedIdDoesNotLeakIntoPendingDeletes() throws IOException {
+        LuceneCommitDeletionPolicy policy = new LuceneCommitDeletionPolicy();
+
+        // Purge ID 42 before any commit with that ID exists
+        policy.purgeCommit(42L);
+
+        // Now a commit with ID 42 appears — it should NOT be deleted
+        // because the purge should have been ignored (ID wasn't tracked)
+        IndexCommit cs42 = mockCommit(Map.of(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, "b42", CatalogSnapshot.CATALOG_SNAPSHOT_ID, "42"));
+        policy.onCommit(List.of(cs42));
+
+        verify(cs42, never()).delete();
+    }
 }

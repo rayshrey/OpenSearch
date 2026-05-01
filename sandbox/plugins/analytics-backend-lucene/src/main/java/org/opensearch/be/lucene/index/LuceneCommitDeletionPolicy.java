@@ -86,6 +86,9 @@ class LuceneCommitDeletionPolicy extends IndexDeletionPolicy {
      * @param snapshotId the CatalogSnapshot ID to purge
      */
     void purgeCommit(long snapshotId) {
+        if (trackedCommits.containsKey(snapshotId) == false) {
+            return;
+        }
         pendingDeletes.add(snapshotId);
     }
 }

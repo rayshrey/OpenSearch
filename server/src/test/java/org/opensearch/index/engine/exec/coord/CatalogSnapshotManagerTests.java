@@ -199,7 +199,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
             CatalogSnapshotManager manager = new CatalogSnapshotManager(
                 List.of(new DataformatAwareCatalogSnapshot(id, generation, version, segments, lastWriterGeneration, userData)),
                 CatalogSnapshotDeletionPolicy.KEEP_LATEST_ONLY,
-                Map.of(),
+                f -> Map.of(),
                 Map.of(),
                 List.of(),
                 null,
@@ -288,7 +288,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
         CatalogSnapshotManager manager = new CatalogSnapshotManager(
             List.of(new DataformatAwareCatalogSnapshot(0, 0, 1, List.of(seg1, seg2, seg3), 0, Map.of())),
             CatalogSnapshotDeletionPolicy.KEEP_LATEST_ONLY,
-            Map.of(),
+            f -> Map.of(),
             Map.of(),
             List.of(),
             null,
@@ -328,7 +328,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
         CatalogSnapshotManager manager = new CatalogSnapshotManager(
             List.of(new DataformatAwareCatalogSnapshot(0, 0, 1, List.of(unrelatedSeg), 0, Map.of())),
             CatalogSnapshotDeletionPolicy.KEEP_LATEST_ONLY,
-            Map.of(),
+            f -> Map.of(),
             Map.of(),
             List.of(),
             null,
@@ -360,7 +360,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
         CatalogSnapshotManager manager = new CatalogSnapshotManager(
             List.of(new DataformatAwareCatalogSnapshot(0, 0, 1, List.of(seg1), 0, Map.of())),
             CatalogSnapshotDeletionPolicy.KEEP_LATEST_ONLY,
-            Map.of(),
+            f -> Map.of(),
             Map.of(),
             List.of(),
             null,
@@ -416,7 +416,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
         CatalogSnapshotManager manager = new CatalogSnapshotManager(
             List.of(new DataformatAwareCatalogSnapshot(1L, 1L, 0L, cs1Segments, 1L, userData)),
             policy,
-            Map.of("parquet", tracker),
+            tracker,
             Map.of(),
             List.of(),
             null,
@@ -469,7 +469,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
         CatalogSnapshotManager manager = new CatalogSnapshotManager(
             List.of(new DataformatAwareCatalogSnapshot(1L, 1L, 0L, cs1Segments, 1L, commitUserData(100, 100, translogUUID))),
             policy,
-            Map.of("parquet", tracker),
+            tracker,
             Map.of(),
             List.of(),
             null,
@@ -524,7 +524,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
                 )
             ),
             policy,
-            Map.of("parquet", tracker),
+            tracker,
             Map.of(),
             List.of(),
             null,
@@ -590,7 +590,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
                 )
             ),
             policy,
-            Map.of("parquet", tracker),
+            tracker,
             Map.of(),
             List.of(),
             null,
@@ -651,7 +651,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
                 )
             ),
             policy,
-            Map.of("parquet", tracker),
+            tracker,
             Map.of(),
             List.of(),
             null,
@@ -736,16 +736,16 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
     }
 
     private CatalogSnapshotManager createManager(List<Segment> segments, Map<String, String> userData) throws IOException {
-        return createManager(segments, userData, CatalogSnapshotDeletionPolicy.KEEP_LATEST_ONLY, Map.of());
+        return createManager(segments, userData, CatalogSnapshotDeletionPolicy.KEEP_LATEST_ONLY, f -> Map.of());
     }
 
     private CatalogSnapshotManager createManager(
         List<Segment> segments,
         Map<String, String> userData,
         CatalogSnapshotDeletionPolicy policy,
-        Map<String, FileDeleter> fileDeleters
+        FileDeleter fileDeleter
     ) throws IOException {
         DataformatAwareCatalogSnapshot snapshot = new DataformatAwareCatalogSnapshot(1L, 1L, 0L, segments, 1L, userData);
-        return new CatalogSnapshotManager(List.of(snapshot), policy, fileDeleters, Map.of(), List.of(), null, null);
+        return new CatalogSnapshotManager(List.of(snapshot), policy, fileDeleter, Map.of(), List.of(), null, null);
     }
 }

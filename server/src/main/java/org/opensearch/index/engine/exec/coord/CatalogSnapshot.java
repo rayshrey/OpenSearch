@@ -64,6 +64,12 @@ public abstract class CatalogSnapshot implements Writeable, Cloneable {
      */
     private volatile Map<String, Collection<String>> filesByFormatCache;
 
+    /**
+     * Whether this snapshot has been committed (persisted via flush).
+     * Package-private — managed by {@link IndexFileDeleter}.
+     */
+    private volatile boolean committed;
+
     protected CatalogSnapshot(String name, long generation, long version) {
         this.generation = generation;
         this.version = version;
@@ -104,6 +110,22 @@ public abstract class CatalogSnapshot implements Writeable, Cloneable {
 
     public long getVersion() {
         return version;
+    }
+
+    /**
+     * Marks this snapshot as committed (persisted via flush).
+     * Package-private — called by {@link IndexFileDeleter#onCommit}.
+     */
+    void markCommitted() {
+        this.committed = true;
+    }
+
+    /**
+     * Returns whether this snapshot was committed.
+     * Package-private — used by {@link IndexFileDeleter#removeFileReferences}.
+     */
+    boolean isCommitted() {
+        return committed;
     }
 
     // Package-private ref counting — only accessible within exec.coord (i.e., CatalogSnapshotManager)

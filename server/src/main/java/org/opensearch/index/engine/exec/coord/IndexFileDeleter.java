@@ -55,7 +55,7 @@ public class IndexFileDeleter {
 
     private final Map<String, Map<String, AtomicInteger>> fileRefCounts;
     private final CatalogSnapshotDeletionPolicy deletionPolicy;
-    private final Map<String, FileDeleter> fileDeleters;
+    private final FileDeleter fileDeleter;
     private final Map<String, FilesListener> filesListeners;
     private final List<CatalogSnapshot> committedSnapshots;
     private final CommitFileManager commitFileManager;
@@ -69,14 +69,14 @@ public class IndexFileDeleter {
 
     public IndexFileDeleter(
         CatalogSnapshotDeletionPolicy deletionPolicy,
-        Map<String, FileDeleter> fileDeleters,
+        FileDeleter fileDeleter,
         Map<String, FilesListener> filesListeners,
         List<CatalogSnapshot> initialCommittedSnapshots,
         ShardPath shardPath,
         CommitFileManager commitFileManager
     ) throws IOException {
         this.deletionPolicy = deletionPolicy;
-        this.fileDeleters = fileDeleters;
+        this.fileDeleter = fileDeleter;
         this.filesListeners = filesListeners;
         this.fileRefCounts = new HashMap<>();
         this.committedSnapshots = new ArrayList<>();
@@ -87,6 +87,7 @@ public class IndexFileDeleter {
             if (cs.tryIncRef() == false) {
                 throw new IllegalStateException("Committed snapshot [gen=" + cs.getGeneration() + "] is already closed");
             }
+            cs.markCommitted();
             this.committedSnapshots.add(cs);
             addFileReferences(cs);
         }
@@ -156,7 +157,7 @@ public class IndexFileDeleter {
         // Delete the commit point (segments_N) BEFORE deleting data files,
         // because deleteCommit may call DirectoryReader.listCommits() which
         // needs to read segment files that are about to be deleted.
-        if (commitFileManager != null) {
+        if (commitFileManager != null && snapshot.isCommitted()) {
             commitFileManager.deleteCommit(snapshot);
         }
         if (filesToDelete.isEmpty() == false) {
@@ -235,10 +236,6 @@ public class IndexFileDeleter {
         for (Map.Entry<String, Set<String>> entry : snapshot.entrySet()) {
             String formatName = entry.getKey();
             Set<String> files = entry.getValue();
-            FileDeleter deleter = fileDeleters.get(formatName);
-            if (deleter == null) {
-                continue;
-            }
             Set<String> stillFailed = new HashSet<>();
             for (String file : files) {
                 // Assert: a file in pendingDeletes must not be re-referenced
@@ -252,7 +249,7 @@ public class IndexFileDeleter {
                         + " This should never happen — once a segment file's ref count reaches 0, no new snapshot should reference it.";
                 }
                 try {
-                    Map<String, Collection<String>> failed = deleter.deleteFiles(Map.of(formatName, List.of(file)));
+                    Map<String, Collection<String>> failed = fileDeleter.deleteFiles(Map.of(formatName, List.of(file)));
                     if (failed.getOrDefault(formatName, Set.of()).contains(file)) {
                         stillFailed.add(file);
                     } else {
@@ -324,33 +321,32 @@ public class IndexFileDeleter {
                 }
             }
         }
+        if (safeToDelete.isEmpty()) {
+            return;
+        }
         Map<String, Collection<String>> successfullyDeleted = new HashMap<>();
-        for (Map.Entry<String, Collection<String>> entry : safeToDelete.entrySet()) {
-            String formatName = entry.getKey();
-            Collection<String> files = entry.getValue();
-            FileDeleter deleter = fileDeleters.get(formatName);
-            if (deleter != null) {
-                try {
-                    Map<String, Collection<String>> failed = deleter.deleteFiles(Map.of(formatName, files));
-                    Collection<String> failedForFormat = failed.getOrDefault(formatName, Set.of());
-                    if (failedForFormat.isEmpty() == false) {
-                        synchronized (this) {
-                            pendingDeletes.computeIfAbsent(formatName, k -> new HashSet<>()).addAll(failedForFormat);
-                        }
-                    }
-                    Collection<String> succeeded = new HashSet<>(files);
-                    succeeded.removeAll(failedForFormat);
-                    if (succeeded.isEmpty() == false) {
-                        successfullyDeleted.put(formatName, succeeded);
-                    }
-                } catch (IOException e) {
-                    logger.warn(
-                        () -> new ParameterizedMessage("Failed to delete files for format [{}], adding to pending deletes", formatName),
-                        e
-                    );
+        try {
+            Map<String, Collection<String>> failed = fileDeleter.deleteFiles(safeToDelete);
+            for (Map.Entry<String, Collection<String>> entry : safeToDelete.entrySet()) {
+                String formatName = entry.getKey();
+                Collection<String> files = entry.getValue();
+                Collection<String> failedForFormat = failed.getOrDefault(formatName, Set.of());
+                if (failedForFormat.isEmpty() == false) {
                     synchronized (this) {
-                        pendingDeletes.computeIfAbsent(formatName, k -> new HashSet<>()).addAll(files);
+                        pendingDeletes.computeIfAbsent(formatName, k -> new HashSet<>()).addAll(failedForFormat);
                     }
+                }
+                Collection<String> succeeded = new HashSet<>(files);
+                succeeded.removeAll(failedForFormat);
+                if (succeeded.isEmpty() == false) {
+                    successfullyDeleted.put(formatName, succeeded);
+                }
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to delete files, adding to pending deletes", e);
+            synchronized (this) {
+                for (Map.Entry<String, Collection<String>> entry : safeToDelete.entrySet()) {
+                    pendingDeletes.computeIfAbsent(entry.getKey(), k -> new HashSet<>()).addAll(entry.getValue());
                 }
             }
         }

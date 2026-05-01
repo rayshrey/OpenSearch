@@ -48,7 +48,6 @@ import org.opensearch.index.engine.dataformat.merge.OneMerge;
 import org.opensearch.index.engine.exec.CatalogSnapshotLifecycleListener;
 import org.opensearch.index.engine.exec.CombinedCatalogSnapshotDeletionPolicy;
 import org.opensearch.index.engine.exec.EngineReaderManager;
-import org.opensearch.index.engine.exec.FileDeleter;
 import org.opensearch.index.engine.exec.FilesListener;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.index.engine.exec.Indexer;
@@ -269,8 +268,6 @@ public class DataFormatAwareEngine implements Indexer {
             );
 
             // 7. Create CatalogSnapshotManager (fully wired)
-            String formatName = config().getIndexSettings().pluggableDataFormat();
-            Map<String, FileDeleter> fileDeleters = Map.of(formatName, indexingExecutionEngine::deleteFiles);
             Map<String, FilesListener> filesListeners = new HashMap<>();
             List<CatalogSnapshotLifecycleListener> snapshotListeners = new ArrayList<>();
             for (Map.Entry<DataFormat, EngineReaderManager<?>> entry : readerManagers.entrySet()) {
@@ -284,7 +281,7 @@ public class DataFormatAwareEngine implements Indexer {
             this.catalogSnapshotManager = new CatalogSnapshotManager(
                 committedSnapshots,
                 combinedPolicy,
-                fileDeleters,
+                indexingExecutionEngine::deleteFiles,
                 filesListeners,
                 snapshotListeners,
                 store.shardPath(),
@@ -699,6 +696,8 @@ public class DataFormatAwareEngine implements Indexer {
                             Segment.Builder segmentBuilder = Segment.builder(writer.generation());
                             boolean hasFiles = false;
                             for (Map.Entry<DataFormat, WriterFileSet> entry : fileInfos.writerFilesMap().entrySet()) {
+                                assert entry.getValue().files().stream().noneMatch(f -> f.contains("/") || f.contains("\\"))
+                                    : "WriterFileSet files must be filenames only, not paths: " + entry.getValue().files();
                                 logger.debug(
                                     "Writer gen={} flushed format=[{}] files={}",
                                     writer.generation(),
