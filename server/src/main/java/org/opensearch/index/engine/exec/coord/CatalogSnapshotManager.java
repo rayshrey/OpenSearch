@@ -86,7 +86,7 @@ public class CatalogSnapshotManager implements Closeable {
      *
      * @param committedSnapshots   the committed snapshots, ordered oldest first; must not be empty
      * @param deletionPolicy       decides which committed snapshots to keep
-     * @param fileDeleters         per-format deleters for actual file deletion
+     * @param fileDeleter          per-format deleters for actual file deletion
      * @param filesListeners       per-format listeners notified on file add/delete
      * @param snapshotListeners    listeners notified on snapshot deletion
      * @param shardPath            for orphan cleanup on init, or null if not needed
@@ -95,7 +95,7 @@ public class CatalogSnapshotManager implements Closeable {
     public CatalogSnapshotManager(
         List<CatalogSnapshot> committedSnapshots,
         CatalogSnapshotDeletionPolicy deletionPolicy,
-        Map<String, FileDeleter> fileDeleters,
+        FileDeleter fileDeleter,
         Map<String, FilesListener> filesListeners,
         List<CatalogSnapshotLifecycleListener> snapshotListeners,
         ShardPath shardPath,
@@ -112,7 +112,7 @@ public class CatalogSnapshotManager implements Closeable {
         }
         this.indexFileDeleter = new IndexFileDeleter(
             deletionPolicy,
-            fileDeleters,
+            fileDeleter,
             filesListeners,
             committedSnapshots,
             shardPath,
@@ -215,6 +215,12 @@ public class CatalogSnapshotManager implements Closeable {
             + latestCatalogSnapshot.getId()
             + "]";
 
+        // Segment generation uniqueness: a generation that appeared in a previous snapshot
+        // must not reappear with different files. This prevents generation overlap bugs
+        // where a merge output reuses a writer generation, causing file identity confusion.
+        assert assertSegmentGenerationFileConsistency(refreshedSegments)
+            : "segment generation-to-file mapping is inconsistent with previous snapshots";
+
         try {
             indexFileDeleter.addFileReferences(newSnapshot);
         } catch (IOException e) {
@@ -225,7 +231,7 @@ public class CatalogSnapshotManager implements Closeable {
         CatalogSnapshot oldSnapshot = latestCatalogSnapshot;
         latestCatalogSnapshot = newSnapshot;
 
-        logger.trace("New Catalog Snapshot created: {}", latestCatalogSnapshot);
+        logger.debug("New Catalog Snapshot created: {}", latestCatalogSnapshot);
 
         // Release the manager's own reference to the old snapshot.
         // The snapshot won't be deleted if the commit path still holds a reference.
@@ -350,5 +356,38 @@ public class CatalogSnapshotManager implements Closeable {
     @Override
     public void close() {
         closed.compareAndSet(false, true);
+    }
+
+    /**
+     * Asserts that no segment generation in the new snapshot conflicts with a different
+     * file set in any existing tracked snapshot. This catches generation overlap bugs
+     * where a merge or writer reuses a generation number, causing the catalog to track
+     * two different file sets under the same generation — which would lead to data loss
+     * when the "wrong" files are deleted.
+     */
+    private boolean assertSegmentGenerationFileConsistency(List<Segment> newSegments) {
+        for (Segment newSeg : newSegments) {
+            for (CatalogSnapshot existing : catalogSnapshotMap.values()) {
+                for (Segment existingSeg : existing.getSegments()) {
+                    if (existingSeg.generation() == newSeg.generation()) {
+                        // Same generation — files must be identical per format
+                        for (Map.Entry<String, WriterFileSet> entry : newSeg.dfGroupedSearchableFiles().entrySet()) {
+                            WriterFileSet existingWfs = existingSeg.dfGroupedSearchableFiles().get(entry.getKey());
+                            if (existingWfs != null && existingWfs.files().equals(entry.getValue().files()) == false) {
+                                logger.error(
+                                    "Generation {} has conflicting files for format [{}]: existing={}, new={}",
+                                    newSeg.generation(),
+                                    entry.getKey(),
+                                    existingWfs.files(),
+                                    entry.getValue().files()
+                                );
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true;
     }
 }

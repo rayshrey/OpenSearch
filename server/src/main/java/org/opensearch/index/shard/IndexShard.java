@@ -5046,6 +5046,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                             afterWriteOperation();
                         }
                     };
+                    logger.info("Triggering flush");
                     threadPool.executor(ThreadPool.Names.FLUSH).execute(flush);
                 } else if (shouldRollTranslogGeneration()) {
                     logger.debug("submitting async roll translog generation request");

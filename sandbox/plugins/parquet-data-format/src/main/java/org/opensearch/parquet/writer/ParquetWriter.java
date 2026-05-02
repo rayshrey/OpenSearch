@@ -103,7 +103,7 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
         }
 
         WriterFileSet writerFileSet = WriterFileSet.builder()
-            .directory(filePath.getParent().getFileName())
+            .directory(filePath.getParent().toAbsolutePath())
             .writerGeneration(writerGeneration)
             .addFile(fileName)
             .addNumRows(metadata.numRows())

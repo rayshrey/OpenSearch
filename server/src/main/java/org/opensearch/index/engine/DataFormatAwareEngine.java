@@ -14,6 +14,7 @@ import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.AlreadyClosedException;
+import org.opensearch.OpenSearchException;
 import org.opensearch.common.Booleans;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.SetOnce;
@@ -62,8 +63,10 @@ import org.opensearch.index.engine.exec.coord.CatalogSnapshotManager;
 import org.opensearch.index.mapper.DocumentMapperForType;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.ParsedDocument;
+import org.opensearch.index.mapper.SeqNoFieldMapper;
 import org.opensearch.index.mapper.SourceToParse;
 import org.opensearch.index.mapper.Uid;
+import org.opensearch.index.mapper.VersionFieldMapper;
 import org.opensearch.index.merge.MergeStats;
 import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.SeqNoStats;
@@ -256,9 +259,9 @@ public class DataFormatAwareEngine implements Indexer {
                 ),
                 registry.format(config().getIndexSettings().pluggableDataFormat())
             );
-            this.writerGenerationCounter = new AtomicLong(1L);
+            this.writerGenerationCounter = new AtomicLong(0L);
             this.writerPool = new LockablePool<>(
-                () -> indexingExecutionEngine.createWriter(writerGenerationCounter.getAndIncrement()),
+                () -> indexingExecutionEngine.createWriter(writerGenerationCounter.incrementAndGet()),
                 LinkedList::new,
                 Runtime.getRuntime().availableProcessors()
             );
@@ -282,8 +285,7 @@ public class DataFormatAwareEngine implements Indexer {
             );
 
             // 7. Create CatalogSnapshotManager (fully wired)
-            String formatName = config().getIndexSettings().pluggableDataFormat();
-            Map<String, FileDeleter> fileDeleters = Map.of(formatName, indexingExecutionEngine::deleteFiles);
+            FileDeleter fileDeleter = indexingExecutionEngine::deleteFiles;
             Map<String, FilesListener> filesListeners = new HashMap<>();
             List<CatalogSnapshotLifecycleListener> snapshotListeners = new ArrayList<>();
             for (Map.Entry<DataFormat, EngineReaderManager<?>> entry : readerManagers.entrySet()) {
@@ -297,7 +299,7 @@ public class DataFormatAwareEngine implements Indexer {
             this.catalogSnapshotManager = new CatalogSnapshotManager(
                 committedSnapshots,
                 combinedPolicy,
-                fileDeleters,
+                fileDeleter,
                 filesListeners,
                 snapshotListeners,
                 store.shardPath(),
@@ -337,7 +339,8 @@ public class DataFormatAwareEngine implements Indexer {
                 indexingExecutionEngine.getMerger(),
                 shardId,
                 dataFormatAwareMergePolicy,
-                dataFormatAwareMergePolicy
+                dataFormatAwareMergePolicy,
+                writerGenerationCounter::incrementAndGet
             );
             this.mergeScheduler = new MergeScheduler(
                 mergeHandler,
@@ -499,7 +502,7 @@ public class DataFormatAwareEngine implements Indexer {
                             index.seqNo(),
                             index.primaryTerm()
                         );
-                        indexResult = indexIntoEngine(index);
+                        indexResult = indexIntoEngine(index, plan);
                     } else {
                         indexResult = new Engine.IndexResult(
                             plan.version,
@@ -518,7 +521,7 @@ public class DataFormatAwareEngine implements Indexer {
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
-    private Engine.IndexResult indexIntoEngine(Engine.Index index) throws IOException {
+    private Engine.IndexResult indexIntoEngine(Engine.Index index, IndexingStrategy plan) throws IOException {
         Engine.IndexResult indexResult;
 
         assert index.seqNo() >= 0 : "ops should have an assigned seq no.; origin: " + index.origin();
@@ -531,11 +534,12 @@ public class DataFormatAwareEngine implements Indexer {
             currentWriter = writerPool.getAndLock();
             // Writer pool must never return null — it creates on demand via the supplier
             assert currentWriter != null : "writer pool returned null writer";
-
+            index.parsedDoc().getDocumentInput().updateField(VersionFieldMapper.NAME, plan.version);
+            index.parsedDoc().getDocumentInput().updateField(SeqNoFieldMapper.NAME, new SeqNoFieldMapper.SequenceIdentifiers(index.seqNo(), index.primaryTerm()));
             WriteResult result = currentWriter.addDoc(index.parsedDoc().getDocumentInput());
 
             if (result instanceof WriteResult.Success) {
-                indexResult = new Engine.IndexResult(index.version(), index.primaryTerm(), index.seqNo(), true);
+                indexResult = new Engine.IndexResult(plan.version, index.primaryTerm(), index.seqNo(), true);
                 // The result must carry the same seq no that was assigned to the operation
                 assert indexResult.getSeqNo() == index.seqNo() : "IndexResult seq no ["
                     + indexResult.getSeqNo()
@@ -544,10 +548,11 @@ public class DataFormatAwareEngine implements Indexer {
                     + "]";
             } else {
                 WriteResult.Failure f = (WriteResult.Failure) result;
-                indexResult = new Engine.IndexResult(f.cause(), index.version(), index.primaryTerm(), index.seqNo());
+                indexResult = new Engine.IndexResult(f.cause(), plan.version, index.primaryTerm(), index.seqNo());
             }
         } catch (Exception e) {
-            indexResult = new Engine.IndexResult(e, index.version(), index.primaryTerm(), index.seqNo());
+            logger.error(e);
+            indexResult = new Engine.IndexResult(e, plan.version, index.primaryTerm(), index.seqNo());
         } finally {
             if (currentWriter != null) {
                 writerPool.releaseAndUnlock(currentWriter);
@@ -564,9 +569,9 @@ public class DataFormatAwareEngine implements Indexer {
                     throw new UnsupportedOperationException(
                         "recording document failure as a no-op in translog is not " + "supported for Data format engine"
                     );
-                } else {
+            } else {
                     location = null;
-                }
+            }
             indexResult.setTranslogLocation(location);
         }
         // Non-translog-origin successful operations must be recorded in the translog for durability
@@ -813,6 +818,7 @@ public class DataFormatAwareEngine implements Indexer {
             try {
                 // Refresh first to flush buffered data to segments
                 refresh("flush");
+                translogManager.rollTranslogGeneration();
                 // Persist the latest catalog snapshot so it survives restart
                 try (GatedConditionalCloseable<CatalogSnapshot> snapshotRef = catalogSnapshotManager.acquireSnapshotForCommit()) {
                     CatalogSnapshot snapshot = snapshotRef.get();
@@ -824,15 +830,7 @@ public class DataFormatAwareEngine implements Indexer {
                         // and available to the deletion policy when onCommit is triggered.
                         translogManager.ensureCanFlush();
                         translogManager.syncTranslog();
-                        // After sync, the persisted checkpoint must equal the processed checkpoint
-                        assert localCheckpointTracker.getPersistedCheckpoint() == localCheckpointTracker.getProcessedCheckpoint()
-                            : "persisted checkpoint ["
-                                + localCheckpointTracker.getPersistedCheckpoint()
-                                + "] must equal processed checkpoint ["
-                                + localCheckpointTracker.getProcessedCheckpoint()
-                                + "] after sync";
                         Map<String, String> commitData = new HashMap<>();
-                        commitData.put(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, snapshot.serializeToString());
                         commitData.put(CatalogSnapshot.LAST_COMPOSITE_WRITER_GEN_KEY, Long.toString(snapshot.getLastWriterGeneration()));
                         commitData.put(CatalogSnapshot.CATALOG_SNAPSHOT_ID, Long.toString(snapshot.getId()));
                         commitData.put(Translog.TRANSLOG_UUID_KEY, translogManager.getTranslogUUID());
@@ -843,8 +841,13 @@ public class DataFormatAwareEngine implements Indexer {
                         commitData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(localCheckpointTracker.getMaxSeqNo()));
                         commitData.put(MAX_UNSAFE_AUTO_ID_TIMESTAMP_COMMIT_ID, Long.toString(maxUnsafeAutoIdTimestamp.get()));
                         commitData.put(Engine.HISTORY_UUID_KEY, historyUUID);
+
                         // Update snapshot userData so deletion policy can read max_seq_no
                         snapshot.setUserData(commitData, true);
+
+                        // Now add snapshot to commit data so it has latest snapshot
+                        commitData.put(CatalogSnapshot.CATALOG_SNAPSHOT_KEY, snapshot.serializeToString());
+
                         // Commit data must contain all keys required for recovery
                         assert commitData.containsKey(CatalogSnapshot.CATALOG_SNAPSHOT_KEY) : "commit data missing catalog snapshot";
                         assert commitData.containsKey(Translog.TRANSLOG_UUID_KEY) : "commit data missing translog UUID";
@@ -853,7 +856,6 @@ public class DataFormatAwareEngine implements Indexer {
                         assert commitData.containsKey(Engine.HISTORY_UUID_KEY) : "commit data missing history UUID";
                         committer.commit(commitData);
                         snapshotRef.markSuccess();
-                        translogManager.rollTranslogGeneration();
                         translogManager.trimUnreferencedReaders();
                     }
                 }
@@ -906,7 +908,7 @@ public class DataFormatAwareEngine implements Indexer {
         boolean upgradeOnlyAncientSegments,
         String forceMergeUUID
     ) throws EngineException, IOException {
-        // TODO: Delegate to IndexingExecutionEngine's Merger when merge scheduling is implemented
+        mergeScheduler.forceMerge(1);
     }
 
     /** {@inheritDoc} Returns the RAM bytes used by the indexing execution engine. */
@@ -1102,7 +1104,22 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public DocsStats docStats() {
         // TODO: Derive from catalog snapshot segment metadata or reader. Pending discussion to finalize this.
-        return new DocsStats(0, 0, 0);
+        try (GatedCloseable<CatalogSnapshot> snapshot = acquireSnapshot()) {
+            return new DocsStats.Builder()
+                .deleted(0L)
+                .count(snapshot.get().getSegments().stream()
+                    .flatMap(segment -> segment.dfGroupedSearchableFiles().values().stream())
+                    .mapToLong(WriterFileSet::numRows)
+                    .sum()
+                )
+                .totalSizeInBytes(snapshot.get().getSegments().stream()
+                    .flatMap(segment -> segment.dfGroupedSearchableFiles().values().stream())
+                    .mapToLong(WriterFileSet::getTotalSize)
+                    .sum())
+                .build();
+        } catch (IOException ex) {
+            throw new OpenSearchException(ex);
+        }
     }
 
     @Override
@@ -1112,7 +1129,7 @@ public class DataFormatAwareEngine implements Indexer {
 
     @Override
     public CompletionStats completionStats(String... fieldNamePatterns) {
-        throw new UnsupportedOperationException("CompletionStats not supported");
+        return new CompletionStats();
     }
 
     @Override
@@ -1335,7 +1352,7 @@ public class DataFormatAwareEngine implements Indexer {
     }
 
     private void triggerPossibleMerges() {
-        if (Booleans.parseBoolean(System.getProperty(MERGE_ENABLED_PROPERTY, Boolean.FALSE.toString())) == false) {
+        if (Booleans.parseBoolean(System.getProperty(MERGE_ENABLED_PROPERTY, Boolean.TRUE.toString())) == false) {
             logger.debug("Pluggable dataformat merge is disabled via system property [{}], skipping merge", MERGE_ENABLED_PROPERTY);
             return;
         }

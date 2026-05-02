@@ -50,6 +50,7 @@ public class MergeHandler {
     private final MergeListener mergeListener;
     private final Merger merger;
     private final Logger logger;
+    private final Supplier<Long> generationProvider;
 
     /**
      * Creates a new merge handler.
@@ -63,13 +64,15 @@ public class MergeHandler {
         Merger merger,
         ShardId shardId,
         MergePolicy mergePolicy,
-        MergeListener mergeListener
+        MergeListener mergeListener,
+        Supplier<Long> generationProvider
     ) {
         this.logger = Loggers.getLogger(getClass(), shardId);
         this.snapshotSupplier = snapshotSupplier;
         this.mergePolicy = mergePolicy;
         this.mergeListener = mergeListener;
         this.merger = merger;
+        this.generationProvider = generationProvider;
     }
 
     /**
@@ -213,7 +216,7 @@ public class MergeHandler {
      * @throws IOException if the merge operation fails
      */
     public MergeResult doMerge(OneMerge oneMerge) throws IOException {
-        MergeInput mergeInput = MergeInput.builder().segments(oneMerge.getSegmentsToMerge()).build();
+        MergeInput mergeInput = MergeInput.builder().segments(oneMerge.getSegmentsToMerge()).newWriterGeneration(generationProvider.get()).build();
         return merger.merge(mergeInput);
     }
 

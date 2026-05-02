@@ -9,10 +9,12 @@
 package org.opensearch.parquet.fields;
 
 import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.parquet.vsr.ManagedVSR;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -39,13 +41,8 @@ public abstract class ParquetField {
      * @param parseValue the parsed value to write
      */
     public final void createField(MappedFieldType fieldType, ManagedVSR managedVSR, Object parseValue) {
-        Objects.requireNonNull(fieldType, "MappedFieldType cannot be null");
-        Objects.requireNonNull(managedVSR, "ManagedVSR cannot be null");
-        if (managedVSR.getVector(fieldType.name()) != null) {
-            addToGroup(fieldType, managedVSR, parseValue);
-        } else {
-            throw new IllegalArgumentException("Vector not found for field: " + fieldType.name());
-        }
+        // double map lookup, 4-5% throughput diff
+        addToGroup(fieldType, managedVSR, parseValue);
     }
 
     /** Returns the Arrow type for this field. */
@@ -53,4 +50,8 @@ public abstract class ParquetField {
 
     /** Returns the Arrow field type with nullability metadata. */
     public abstract FieldType getFieldType();
+
+    public List<Field> children() {
+        return null;
+    }
 }
