@@ -321,7 +321,8 @@ public class DataFormatAwareEngine implements Indexer {
                 indexingExecutionEngine.getMerger(),
                 shardId,
                 dataFormatAwareMergePolicy,
-                dataFormatAwareMergePolicy
+                dataFormatAwareMergePolicy,
+                writerGenerationCounter::incrementAndGet
             );
             this.mergeScheduler = new MergeScheduler(
                 mergeHandler,
@@ -772,6 +773,8 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public void flush(boolean force, boolean waitIfOngoing) throws EngineException {
         ensureOpen();
+        logger.info("[DFA] flush() called, caller={}",
+            new Exception("stack trace").getStackTrace()[1]);
         if (force && waitIfOngoing == false) {
             throw new IllegalArgumentException(
                 "wait_if_ongoing must be true for a force flush: force=" + force + " wait_if_ongoing=" + waitIfOngoing
@@ -860,10 +863,15 @@ public class DataFormatAwareEngine implements Indexer {
     public boolean shouldPeriodicallyFlush() {
         ensureOpen();
         final long localCheckpointOfLastCommit = localCheckpointTracker.getPersistedCheckpoint();
-        return translogManager.shouldPeriodicallyFlush(
+        boolean result = translogManager.shouldPeriodicallyFlush(
             localCheckpointOfLastCommit,
             engineConfig.getIndexSettings().getFlushThresholdSize().getBytes()
         );
+        if (result) {
+            logger.info("[DFA] shouldPeriodicallyFlush=true, persistedCP={}, threshold={}",
+                localCheckpointOfLastCommit, engineConfig.getIndexSettings().getFlushThresholdSize());
+        }
+        return result;
     }
 
     /** Triggers a refresh to flush the indexing buffer to segments. */
