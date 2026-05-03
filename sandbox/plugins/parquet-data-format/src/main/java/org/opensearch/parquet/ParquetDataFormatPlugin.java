@@ -65,6 +65,7 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin 
     public static final String PARQUET_THREAD_POOL_NAME = "parquet_native_write";
 
     private static final ParquetDataFormat dataFormat = new ParquetDataFormat();
+    public static final ParquetDataFormat PARQUET_DATA_FORMAT = dataFormat;
     /** Initialized to EMPTY to avoid NPE if indexingEngine() is called before createComponents(). */
     private Settings settings = Settings.EMPTY;
     private ThreadPool threadPool;

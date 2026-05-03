@@ -23,6 +23,8 @@ import org.opensearch.index.engine.exec.commit.IndexStoreProvider;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.index.store.PrecomputedChecksumStrategy;
+import static org.opensearch.parquet.ParquetDataFormatPlugin.PARQUET_DATA_FORMAT;
+
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.NativeSettings;
 import org.opensearch.parquet.bridge.RustBridge;
@@ -139,7 +141,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
             throw new RuntimeException(e);
         }
         this.parquetMerger = new ParquetMergeExecutor(
-            new NativeParquetMergeStrategy(dataFormat, indexSettings.getIndex().getName(), shardPath.getDataPath())
+            new NativeParquetMergeStrategy(dataFormat, indexSettings.getIndex().getName(), shardPath, (fileName, crc32, gen) -> {})
         );
         pushSettingsToRust();
     }
@@ -181,11 +183,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
 
     @Override
     public Writer<ParquetDocumentInput> createWriter(long writerGeneration) {
-        Path filePath = Path.of(
-            shardPath.getDataPath().toString(),
-            dataFormat.name(),
-            FILE_NAME_PREFIX + "_" + writerGeneration + FILE_NAME_EXT
-        );
+        Path filePath = buildParquetFilePath(shardPath, writerGeneration, null);
         return new ParquetWriter(
             filePath.toString(),
             writerGeneration,
@@ -269,5 +267,19 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
             );
         }
         bufferPool.close();
+    }
+
+    public static Path buildParquetFilePath(ShardPath shardPath, long writerGeneration, String additionalPrefix) {
+        String subDirectory = PARQUET_DATA_FORMAT.name();
+        return shardPath.getDataPath().resolve(subDirectory).resolve(buildParquetFileName(writerGeneration, additionalPrefix));
+    }
+
+    public static String buildParquetFileName(long writerGeneration, String additionalPrefix) {
+        StringBuilder fileNameBuilder = new StringBuilder(FILE_NAME_PREFIX);
+        if (additionalPrefix != null) {
+            fileNameBuilder.append("_").append(additionalPrefix);
+        }
+        fileNameBuilder.append("_").append(Long.toHexString(writerGeneration)).append(FILE_NAME_EXT);
+        return fileNameBuilder.toString();
     }
 }

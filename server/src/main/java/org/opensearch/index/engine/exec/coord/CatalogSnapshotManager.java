@@ -178,7 +178,7 @@ public class CatalogSnapshotManager implements Closeable {
      *
      * @param refreshedSegments the segments produced by the latest refresh
      */
-    public synchronized void commitNewSnapshot(List<Segment> refreshedSegments) {
+    public synchronized void commitNewSnapshot(List<Segment> refreshedSegments) throws IOException {
         if (closed.get()) {
             throw new IllegalStateException("CatalogSnapshotManager is closed");
         }
@@ -187,6 +187,9 @@ public class CatalogSnapshotManager implements Closeable {
         // that readers and the commit path depend on
         long prevGen = latestCatalogSnapshot.getGeneration();
 
+        for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
+            listener.beforeRefresh();
+        }
         DataformatAwareCatalogSnapshot newSnapshot = new DataformatAwareCatalogSnapshot(
             latestCatalogSnapshot.getId() + 1,
             latestCatalogSnapshot.getGeneration() + 1,
@@ -195,6 +198,9 @@ public class CatalogSnapshotManager implements Closeable {
             latestCatalogSnapshot.getLastWriterGeneration() + 1,
             latestCatalogSnapshot.getUserData()
         );
+        for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
+            listener.afterRefresh(true, newSnapshot);
+        }
 
         // New snapshot generation must be strictly greater than the previous
         assert newSnapshot.getGeneration() > prevGen : "new snapshot generation ["
@@ -208,6 +214,9 @@ public class CatalogSnapshotManager implements Closeable {
             + "] must be > previous ["
             + latestCatalogSnapshot.getId()
             + "]";
+
+        assert assertSegmentGenerationFileConsistency(refreshedSegments)
+            : "segment generation-to-file mapping is inconsistent with previous snapshots";
 
         try {
             indexFileDeleter.addFileReferences(newSnapshot);
@@ -345,5 +354,30 @@ public class CatalogSnapshotManager implements Closeable {
     @Override
     public void close() {
         closed.compareAndSet(false, true);
+    }
+
+    private boolean assertSegmentGenerationFileConsistency(List<Segment> newSegments) {
+        for (Segment newSeg : newSegments) {
+            for (CatalogSnapshot existing : catalogSnapshotMap.values()) {
+                for (Segment existingSeg : existing.getSegments()) {
+                    if (existingSeg.generation() == newSeg.generation()) {
+                        for (Map.Entry<String, WriterFileSet> entry : newSeg.dfGroupedSearchableFiles().entrySet()) {
+                            WriterFileSet existingWfs = existingSeg.dfGroupedSearchableFiles().get(entry.getKey());
+                            if (existingWfs != null && existingWfs.files().equals(entry.getValue().files()) == false) {
+                                logger.error(
+                                    "Generation {} has conflicting files for format [{}]: existing={}, new={}",
+                                    newSeg.generation(),
+                                    entry.getKey(),
+                                    existingWfs.files(),
+                                    entry.getValue().files()
+                                );
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true;
     }
 }

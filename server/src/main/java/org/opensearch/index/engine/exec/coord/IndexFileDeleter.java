@@ -17,6 +17,7 @@ import org.opensearch.index.engine.exec.CommitFileManager;
 import org.opensearch.index.engine.exec.FileDeleter;
 import org.opensearch.index.engine.exec.FilesListener;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.secure_sm.AccessController;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -249,7 +250,7 @@ public class IndexFileDeleter {
                         + " This should never happen — once a segment file's ref count reaches 0, no new snapshot should reference it.";
                 }
                 try {
-                    Map<String, Collection<String>> failed = fileDeleter.deleteFiles(Map.of(formatName, List.of(file)));
+                    Map<String, Collection<String>> failed = AccessController.doPrivilegedChecked(() -> fileDeleter.deleteFiles(Map.of(formatName, List.of(file))));
                     if (failed.getOrDefault(formatName, Set.of()).contains(file)) {
                         stillFailed.add(file);
                     } else {
@@ -326,7 +327,7 @@ public class IndexFileDeleter {
         }
         Map<String, Collection<String>> successfullyDeleted = new HashMap<>();
         try {
-            Map<String, Collection<String>> failed = fileDeleter.deleteFiles(safeToDelete);
+            Map<String, Collection<String>> failed = AccessController.doPrivilegedChecked(() -> fileDeleter.deleteFiles(safeToDelete));
             for (Map.Entry<String, Collection<String>> entry : safeToDelete.entrySet()) {
                 String formatName = entry.getKey();
                 Collection<String> files = entry.getValue();

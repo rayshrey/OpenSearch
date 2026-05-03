@@ -226,4 +226,34 @@ public abstract class MetadataFieldMapper extends ParametrizedFieldMapper {
         // do nothing
     }
 
+    public void preParse(ParseContext parseContext, String source) throws IOException {
+        if (parseContext.indexSettings().isPluggableDataFormatEnabled()) {
+            preParseForPluggableFormat(parseContext);
+        } else {
+            preParse(parseContext);
+        }
+    }
+
+    public void postParse(ParseContext parseContext, String source) throws IOException {
+        if (parseContext.indexSettings().isPluggableDataFormatEnabled()) {
+            postParseForPluggableFormat(parseContext);
+        } else {
+            postParse(parseContext);
+        }
+    }
+
+    /**
+     * Called before {@link FieldMapper#parse(ParseContext)} on the {@link RootObjectMapper}.
+     */
+    public void preParseForPluggableFormat(ParseContext context) throws IOException {
+        // do nothing
+    }
+
+    /**
+     * Called after {@link FieldMapper#parse(ParseContext)} on the {@link RootObjectMapper}.
+     */
+    public void postParseForPluggableFormat(ParseContext context) throws IOException {
+        // do nothing
+    }
+
 }
