@@ -284,5 +284,4 @@ grant {
 
   // allow to access krb5.conf
   permission java.io.FilePermission "${{java.security.krb5.conf}}", "read";
-  permission java.io.FilePermission "/-", "delete";
 };

@@ -10,6 +10,15 @@ package org.opensearch.common.queue;
 
 import java.util.concurrent.locks.ReentrantLock;
 
+/**
+ * A {@link Lockable} wrapper around an arbitrary reference, pairing the value with
+ * a {@link ReentrantLock} for use in pool-based concurrency patterns.
+ *
+ * <p>Used by {@link LockablePool} to track items that can be locked for exclusive
+ * access (e.g., writers in the indexing pipeline) and unlocked when returned to the pool.
+ *
+ * @param <T> the type of the wrapped reference
+ */
 public class DefaultLockableHolder<T> implements Lockable {
 
     private final T ref;
@@ -19,6 +28,13 @@ public class DefaultLockableHolder<T> implements Lockable {
         this.ref = ref;
     }
 
+    /**
+     * Creates a new holder wrapping the given reference.
+     *
+     * @param ref the reference to wrap
+     * @param <R> the reference type
+     * @return a new {@code DefaultLockableHolder} containing {@code ref}
+     */
     public static <R> DefaultLockableHolder<R> of(R ref) {
         return new DefaultLockableHolder<>(ref);
     }
@@ -38,6 +54,11 @@ public class DefaultLockableHolder<T> implements Lockable {
         lock.unlock();
     }
 
+    /**
+     * Returns the wrapped reference.
+     *
+     * @return the reference held by this holder
+     */
     public T get() {
         return ref;
     }
