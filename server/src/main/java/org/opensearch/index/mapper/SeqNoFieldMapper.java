@@ -246,6 +246,7 @@ public class SeqNoFieldMapper extends MetadataFieldMapper {
      * @param primaryTerm primary term for the shard
      */
     @InternalApi
-    public record SequenceIdentifiers(long sequenceNumber, long primaryTerm) {}
+    public record SequenceIdentifiers(long sequenceNumber, long primaryTerm) {
+    }
 
 }

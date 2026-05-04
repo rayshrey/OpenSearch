@@ -23,6 +23,7 @@ import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.concurrent.GatedConditionalCloseable;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.logging.Loggers;
+import org.opensearch.common.queue.DefaultLockableHolder;
 import org.opensearch.common.queue.LockablePool;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.ReleasableLock;
@@ -40,6 +41,7 @@ import org.opensearch.index.engine.dataformat.MergeResult;
 import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.dataformat.RefreshInput;
 import org.opensearch.index.engine.dataformat.RefreshResult;
+import org.opensearch.index.engine.dataformat.RowIdAwareWriter;
 import org.opensearch.index.engine.dataformat.WriteResult;
 import org.opensearch.index.engine.dataformat.Writer;
 import org.opensearch.index.engine.dataformat.merge.DataFormatAwareMergePolicy;
@@ -135,7 +137,7 @@ public class DataFormatAwareEngine implements Indexer {
 
     private final IndexingExecutionEngine indexingExecutionEngine;
     private final IndexingStrategyPlanner indexingStrategyPlanner;
-    private final LockablePool<Writer<?>> writerPool;
+    private final LockablePool<DefaultLockableHolder<Writer<?>>> writerPool;
     private final AtomicLong writerGenerationCounter;
 
     private final Map<DataFormat, EngineReaderManager<?>> readerManagers;
@@ -260,11 +262,11 @@ public class DataFormatAwareEngine implements Indexer {
                 registry.format(config().getIndexSettings().pluggableDataFormat())
             );
             this.writerGenerationCounter = new AtomicLong(0L);
-            this.writerPool = new LockablePool<>(
-                () -> indexingExecutionEngine.createWriter(writerGenerationCounter.incrementAndGet()),
-                LinkedList::new,
-                Runtime.getRuntime().availableProcessors()
-            );
+            this.writerPool = new LockablePool<>(() -> {
+                long gen = writerGenerationCounter.incrementAndGet();
+                assert gen > 0 : "writer generation must be positive but was: " + gen;
+                return DefaultLockableHolder.of(new RowIdAwareWriter<>(indexingExecutionEngine.createWriter(gen)));
+            }, LinkedList::new, Runtime.getRuntime().availableProcessors());
             // Create Reader managers
             // We will pass IndexStoreProvider to this, which would contain store
             // and any index specific attributes useful for reads.
@@ -340,7 +342,11 @@ public class DataFormatAwareEngine implements Indexer {
                 shardId,
                 dataFormatAwareMergePolicy,
                 dataFormatAwareMergePolicy,
-                writerGenerationCounter::incrementAndGet
+                () -> {
+                    long gen = writerGenerationCounter.incrementAndGet();
+                    assert gen > 0 : "merge generation must be positive but was: " + gen;
+                    return gen;
+                }
             );
             this.mergeScheduler = new MergeScheduler(
                 mergeHandler,
@@ -455,6 +461,8 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public Engine.IndexResult index(Engine.Index index) throws IOException {
         assert Objects.equals(index.uid().field(), IdFieldMapper.NAME) : index.uid().field();
+        assert index.origin() == Engine.Operation.Origin.PRIMARY : "DataFormatAwareEngine only supports PRIMARY origin but got: "
+            + index.origin();
         final boolean doThrottle = index.origin().isRecovery() == false;
         try (ReleasableLock ignored = readLock.acquire()) {
             ensureOpen();
@@ -530,12 +538,17 @@ public class DataFormatAwareEngine implements Indexer {
 
         // Convert ParsedDocument to DocumentInput and write via the execution engine's writer
         Writer currentWriter = null;
+        DefaultLockableHolder<Writer<?>> lockedWriter = writerPool.getAndLock();
         try {
-            currentWriter = writerPool.getAndLock();
+            currentWriter = lockedWriter.get();
             // Writer pool must never return null — it creates on demand via the supplier
             assert currentWriter != null : "writer pool returned null writer";
+            assert index.seqNo() >= 0 : "seqNo must be assigned before writing but was: " + index.seqNo();
+            assert index.primaryTerm() > 0 : "primaryTerm must be positive but was: " + index.primaryTerm();
             index.parsedDoc().getDocumentInput().updateField(VersionFieldMapper.NAME, plan.version);
-            index.parsedDoc().getDocumentInput().updateField(SeqNoFieldMapper.NAME, new SeqNoFieldMapper.SequenceIdentifiers(index.seqNo(), index.primaryTerm()));
+            index.parsedDoc()
+                .getDocumentInput()
+                .updateField(SeqNoFieldMapper.NAME, new SeqNoFieldMapper.SequenceIdentifiers(index.seqNo(), index.primaryTerm()));
             WriteResult result = currentWriter.addDoc(index.parsedDoc().getDocumentInput());
 
             if (result instanceof WriteResult.Success) {
@@ -555,7 +568,7 @@ public class DataFormatAwareEngine implements Indexer {
             indexResult = new Engine.IndexResult(e, plan.version, index.primaryTerm(), index.seqNo());
         } finally {
             if (currentWriter != null) {
-                writerPool.releaseAndUnlock(currentWriter);
+                writerPool.releaseAndUnlock(lockedWriter);
             }
         }
 
@@ -569,9 +582,9 @@ public class DataFormatAwareEngine implements Indexer {
                     throw new UnsupportedOperationException(
                         "recording document failure as a no-op in translog is not " + "supported for Data format engine"
                     );
-            } else {
+                } else {
                     location = null;
-            }
+                }
             indexResult.setTranslogLocation(location);
         }
         // Non-translog-origin successful operations must be recorded in the translog for durability
@@ -708,11 +721,12 @@ public class DataFormatAwareEngine implements Indexer {
             try (GatedCloseable<CatalogSnapshot> catalogSnapshot = catalogSnapshotManager.acquireSnapshot()) {
                 if (store.tryIncRef()) {
                     try {
-                        List<Writer<?>> writers = writerPool.checkoutAll();
+                        List<DefaultLockableHolder<Writer<?>>> writers = writerPool.checkoutAll();
                         List<Segment> existingSegments = catalogSnapshot.get().getSegments();
                         List<Segment> newSegments = new ArrayList<>();
 
-                        for (Writer<?> writer : writers) {
+                        for (var lockable : writers) {
+                            Writer<?> writer = lockable.get();
                             FileInfos fileInfos = writer.flush();
                             Segment.Builder segmentBuilder = Segment.builder(writer.generation());
                             boolean hasFiles = false;
@@ -736,6 +750,15 @@ public class DataFormatAwareEngine implements Indexer {
                         // Every new segment must contain files from at least one data format
                         assert newSegments.stream().allMatch(s -> s.dfGroupedSearchableFiles().isEmpty() == false)
                             : "new segments must have at least one format's files";
+
+                        // No two new segments may share the same generation
+                        assert newSegments.stream().map(Segment::generation).distinct().count() == newSegments.size()
+                            : "new segments must have unique generations";
+
+                        // New segment generations must not collide with existing segment generations
+                        assert newSegments.stream()
+                            .noneMatch(ns -> existingSegments.stream().anyMatch(es -> es.generation() == ns.generation()))
+                            : "new segment generation collides with an existing segment generation";
 
                         // refresh only if new segments have been created or force param is true
                         notifyRefreshListenersBefore();
@@ -854,6 +877,10 @@ public class DataFormatAwareEngine implements Indexer {
                         assert commitData.containsKey(SequenceNumbers.LOCAL_CHECKPOINT_KEY) : "commit data missing local checkpoint";
                         assert commitData.containsKey(SequenceNumbers.MAX_SEQ_NO) : "commit data missing max seq no";
                         assert commitData.containsKey(Engine.HISTORY_UUID_KEY) : "commit data missing history UUID";
+                        assert snapshot.getId() >= 0 : "snapshot ID must be non-negative but was: " + snapshot.getId();
+                        assert Long.parseLong(commitData.get(SequenceNumbers.LOCAL_CHECKPOINT_KEY)) >= -1
+                            : "local checkpoint in commit data must be >= -1";
+                        assert Long.parseLong(commitData.get(SequenceNumbers.MAX_SEQ_NO)) >= -1 : "max seq no in commit data must be >= -1";
                         committer.commit(commitData);
                         snapshotRef.markSuccess();
                         translogManager.trimUnreferencedReaders();
@@ -1103,20 +1130,22 @@ public class DataFormatAwareEngine implements Indexer {
 
     @Override
     public DocsStats docStats() {
-        // TODO: Derive from catalog snapshot segment metadata or reader. Pending discussion to finalize this.
         try (GatedCloseable<CatalogSnapshot> snapshot = acquireSnapshot()) {
-            return new DocsStats.Builder()
-                .deleted(0L)
-                .count(snapshot.get().getSegments().stream()
-                    .flatMap(segment -> segment.dfGroupedSearchableFiles().values().stream())
-                    .mapToLong(WriterFileSet::numRows)
-                    .sum()
-                )
-                .totalSizeInBytes(snapshot.get().getSegments().stream()
-                    .flatMap(segment -> segment.dfGroupedSearchableFiles().values().stream())
-                    .mapToLong(WriterFileSet::getTotalSize)
-                    .sum())
-                .build();
+            long count = snapshot.get()
+                .getSegments()
+                .stream()
+                .flatMap(segment -> segment.dfGroupedSearchableFiles().values().stream())
+                .mapToLong(WriterFileSet::numRows)
+                .sum();
+            long totalSize = snapshot.get()
+                .getSegments()
+                .stream()
+                .flatMap(segment -> segment.dfGroupedSearchableFiles().values().stream())
+                .mapToLong(WriterFileSet::getTotalSize)
+                .sum();
+            assert count >= 0 : "doc count must be non-negative but was: " + count;
+            assert totalSize >= 0 : "total size must be non-negative but was: " + totalSize;
+            return new DocsStats.Builder().deleted(0L).count(count).totalSizeInBytes(totalSize).build();
         } catch (IOException ex) {
             throw new OpenSearchException(ex);
         }
@@ -1124,6 +1153,7 @@ public class DataFormatAwareEngine implements Indexer {
 
     @Override
     public SegmentsStats segmentsStats(boolean includeSegmentFileSizes, boolean includeUnloadedSegments) {
+        SegmentsStats stats = new SegmentsStats();
         throw new UnsupportedOperationException("Unsupported operation");
     }
 
@@ -1335,6 +1365,9 @@ public class DataFormatAwareEngine implements Indexer {
     }
 
     private void applyMergeChanges(MergeResult mergeResult, OneMerge oneMerge) {
+        assert mergeResult != null : "merge result must not be null";
+        assert oneMerge != null : "oneMerge must not be null";
+        assert oneMerge.getSegmentsToMerge().isEmpty() == false : "merged segments list must not be empty";
         refreshLock.lock();
         try {
             catalogSnapshotManager.applyMergeResults(mergeResult, oneMerge);
@@ -1364,7 +1397,11 @@ public class DataFormatAwareEngine implements Indexer {
             assert rwl.isWriteLockedByCurrentThread() || failEngineLock.isHeldByCurrentThread()
                 : "Either the write lock must be held or the engine must be currently failing";
             try {
-                IOUtils.close(indexingExecutionEngine, translogManager);
+                // Close all writers still in the pool (unflushed writers from the current cycle)
+                for (var holder : writerPool.checkoutAll()) {
+                    IOUtils.closeWhileHandlingException(holder.get());
+                }
+                IOUtils.close(indexingExecutionEngine, committer, translogManager);
                 closeReaders();
             } catch (Exception e) {
                 logger.warn("failed to close engine resources", e);

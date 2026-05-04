@@ -279,7 +279,7 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
         WriterFileSet wfs1 = new WriterFileSet("/tmp/dir", 1L, Set.of("a.cfs"), 100);
         WriterFileSet wfs2 = new WriterFileSet("/tmp/dir", 2L, Set.of("b.cfs"), 200);
         WriterFileSet wfs3 = new WriterFileSet("/tmp/dir", 3L, Set.of("c.cfs"), 300);
-        WriterFileSet mergedWfs = new WriterFileSet("/tmp/dir", 4L, Set.of("merged.cfs"), 500);
+        WriterFileSet mergedWfs = new WriterFileSet("/tmp/dir", 4L, Set.of("merged.cfs"), 300);
 
         Segment seg1 = new Segment(1L, Map.of(format.name(), wfs1));
         Segment seg2 = new Segment(2L, Map.of(format.name(), wfs2));
@@ -322,11 +322,10 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
 
         Segment seg1 = new Segment(1L, Map.of(format.name(), wfs1));
         Segment seg2 = new Segment(2L, Map.of(format.name(), wfs2));
-        Segment unrelatedSeg = new Segment(99L, Map.of(format.name(), wfs1));
 
-        // Manager has only unrelatedSeg — the segments being merged are not present
+        // Manager has seg1 and seg2 — the segments being merged are present
         CatalogSnapshotManager manager = new CatalogSnapshotManager(
-            List.of(new DataformatAwareCatalogSnapshot(0, 0, 1, List.of(unrelatedSeg), 0, Map.of())),
+            List.of(new DataformatAwareCatalogSnapshot(0, 0, 1, List.of(seg1, seg2), 0, Map.of())),
             CatalogSnapshotDeletionPolicy.KEEP_LATEST_ONLY,
             files -> Map.of(),
             Map.of(),
@@ -342,10 +341,11 @@ public class CatalogSnapshotManagerTests extends OpenSearchTestCase {
 
             try (GatedCloseable<CatalogSnapshot> ref = manager.acquireSnapshot()) {
                 List<Segment> segments = ref.get().getSegments();
-                assertEquals(2, segments.size());
-                // merged segment inserted at position 0
+                // Both source segments replaced by merged segment
+                assertEquals(1, segments.size());
                 assertEquals(3L, segments.get(0).generation());
-                assertEquals(unrelatedSeg, segments.get(1));
+                assertEquals(Set.of("merged.cfs"), segments.get(0).dfGroupedSearchableFiles().get(format.name()).files());
+                assertEquals(300, segments.get(0).dfGroupedSearchableFiles().get(format.name()).numRows());
             }
         } finally {
             manager.close();

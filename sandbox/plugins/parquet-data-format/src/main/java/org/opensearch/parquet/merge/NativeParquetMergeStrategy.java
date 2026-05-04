@@ -17,7 +17,6 @@ import org.opensearch.index.engine.dataformat.MergeInput;
 import org.opensearch.index.engine.dataformat.MergeResult;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.shard.ShardPath;
-import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
@@ -41,8 +40,12 @@ public class NativeParquetMergeStrategy implements ParquetMergeStrategy {
     private final ShardPath shardPath;
     private TriConsumer<String, Long, Long> checksumUpdater;
 
-
-    public NativeParquetMergeStrategy(DataFormat dataFormat, String indexName, ShardPath shardPath, TriConsumer<String, Long, Long> checksumUpdater) {
+    public NativeParquetMergeStrategy(
+        DataFormat dataFormat,
+        String indexName,
+        ShardPath shardPath,
+        TriConsumer<String, Long, Long> checksumUpdater
+    ) {
         this.dataFormat = dataFormat;
         this.indexName = indexName;
         this.shardPath = shardPath;
@@ -57,12 +60,17 @@ public class NativeParquetMergeStrategy implements ParquetMergeStrategy {
         if (files.isEmpty()) {
             throw new IllegalArgumentException("No files to merge");
         }
+        assert writerGeneration > 0 : "merge writer generation must be positive but was: " + writerGeneration;
 
         List<Path> filePaths = new ArrayList<>();
         files.forEach(
-            writerFileSet -> writerFileSet.files()
-                .forEach(file -> filePaths.add(Path.of(writerFileSet.directory()).resolve(file)))
+            writerFileSet -> writerFileSet.files().forEach(file -> filePaths.add(Path.of(writerFileSet.directory()).resolve(file)))
         );
+        assert filePaths.isEmpty() == false : "must have at least one input file path for merge";
+        // All input files must exist on disk before invoking the native merge
+        // This will change to object store lookup once warm is in place
+        assert filePaths.stream().allMatch(p -> java.nio.file.Files.exists(p)) : "all input files must exist on disk before merge: "
+            + filePaths.stream().filter(p -> java.nio.file.Files.exists(p) == false).toList();
 
         Path mergedFilePath = ParquetIndexingEngine.buildParquetFilePath(shardPath, writerGeneration, "merged");
         String mergedFileName = mergedFilePath.getFileName().toString();
@@ -71,6 +79,13 @@ public class NativeParquetMergeStrategy implements ParquetMergeStrategy {
             // Merge files in Rust
             ParquetFileMetadata mergeMetadata = RustBridge.mergeParquetFilesInRust(filePaths, mergedFilePath.toString(), indexName);
             assert mergeMetadata.numRows() > 0 : "Merged file should contain at least one row";
+
+            long expectedRows = files.stream().mapToLong(WriterFileSet::numRows).sum();
+            assert mergeMetadata.numRows() == expectedRows : "Merged row count ["
+                + mergeMetadata.numRows()
+                + "] must equal sum of input row counts ["
+                + expectedRows
+                + "]";
 
             WriterFileSet mergedWriterFileSet = WriterFileSet.builder()
                 .directory(mergedFilePath.getParent().toAbsolutePath())

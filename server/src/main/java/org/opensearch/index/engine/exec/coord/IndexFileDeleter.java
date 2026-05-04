@@ -249,7 +249,9 @@ public class IndexFileDeleter {
                         + " This should never happen — once a segment file's ref count reaches 0, no new snapshot should reference it.";
                 }
                 try {
-                    Map<String, Collection<String>> failed = AccessController.doPrivilegedChecked(() -> fileDeleter.deleteFiles(Map.of(formatName, List.of(file))));
+                    Map<String, Collection<String>> failed = AccessController.doPrivilegedChecked(
+                        () -> fileDeleter.deleteFiles(Map.of(formatName, List.of(file)))
+                    );
                     if (failed.getOrDefault(formatName, Set.of()).contains(file)) {
                         stillFailed.add(file);
                     } else {
@@ -327,7 +329,9 @@ public class IndexFileDeleter {
             Collection<String> files = entry.getValue();
             if (fileDeleter != null) {
                 try {
-                    Map<String, Collection<String>> failed = AccessController.doPrivilegedChecked(() -> fileDeleter.deleteFiles(Map.of(formatName, files)));
+                    Map<String, Collection<String>> failed = AccessController.doPrivilegedChecked(
+                        () -> fileDeleter.deleteFiles(Map.of(formatName, files))
+                    );
                     Collection<String> failedForFormat = failed.getOrDefault(formatName, Set.of());
                     if (failedForFormat.isEmpty() == false) {
                         synchronized (this) {

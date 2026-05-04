@@ -15,7 +15,6 @@ import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.parquet.vsr.ManagedVSR;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Abstract base class for Parquet field implementations that handle conversion

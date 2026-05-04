@@ -42,6 +42,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -134,6 +135,8 @@ public class CompositeMergeIT extends OpenSearchIntegTestCase {
         assertEquals(Set.of("parquet"), snapshot.getDataFormats());
 
         verifyRowCount(snapshot, totalDocs);
+        verifySegmentGenerationUniqueness(snapshot);
+        verifyNoOrphanFiles(snapshot);
     }
 
     /**
@@ -170,6 +173,8 @@ public class CompositeMergeIT extends OpenSearchIntegTestCase {
 
         verifyRowCount(snapshot, totalDocs);
         verifySortOrder(snapshot);
+        verifySegmentGenerationUniqueness(snapshot);
+        verifyNoOrphanFiles(snapshot);
     }
 
     // ── Settings ──
@@ -248,10 +253,36 @@ public class CompositeMergeIT extends OpenSearchIntegTestCase {
                 Path filePath = parquetDir.resolve(file);
                 assertTrue("Parquet file should exist: " + filePath, Files.exists(filePath));
                 ParquetFileMetadata metadata = RustBridge.getFileMetadata(filePath.toString());
+                assertEquals("WriterFileSet numRows should match actual file metadata for " + file, wfs.numRows(), metadata.numRows());
                 totalRows += metadata.numRows();
             }
         }
         assertEquals("Total rows across all segments should match ingested docs", expectedTotalDocs, totalRows);
+    }
+
+    private void verifySegmentGenerationUniqueness(DataformatAwareCatalogSnapshot snapshot) {
+        List<Long> generations = snapshot.getSegments().stream().map(Segment::generation).toList();
+        assertEquals("All segment generations must be unique", generations.size(), generations.stream().distinct().count());
+    }
+
+    private void verifyNoOrphanFiles(DataformatAwareCatalogSnapshot snapshot) throws IOException {
+        Path parquetDir = getParquetDir();
+        Set<String> referencedFiles = new HashSet<>();
+        for (Segment segment : snapshot.getSegments()) {
+            WriterFileSet wfs = segment.dfGroupedSearchableFiles().get("parquet");
+            if (wfs != null) {
+                referencedFiles.addAll(wfs.files());
+            }
+        }
+        try (var stream = Files.list(parquetDir)) {
+            List<String> diskFiles = stream.filter(Files::isRegularFile)
+                .map(p -> p.getFileName().toString())
+                .filter(f -> f.endsWith(".parquet"))
+                .toList();
+            for (String diskFile : diskFiles) {
+                assertTrue("Orphan parquet file on disk not referenced by catalog: " + diskFile, referencedFiles.contains(diskFile));
+            }
+        }
     }
 
     /**

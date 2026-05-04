@@ -258,24 +258,17 @@ public class IndexFileDeleterTests extends OpenSearchTestCase {
             )
         );
         CatalogSnapshot cs1 = snapshot(1, List.of(seg), commitUserData(100, 100, "uuid"));
-        IndexFileDeleter deleter = new IndexFileDeleter(
-            policy,
-            files -> {
-                Map<String, Collection<String>> failed = new java.util.HashMap<>();
-                for (Map.Entry<String, Collection<String>> e : files.entrySet()) {
-                    if ("parquet".equals(e.getKey())) {
-                        failed.putAll(parquetTracker.deleteFiles(Map.of(e.getKey(), e.getValue())));
-                    } else if ("lucene".equals(e.getKey())) {
-                        failed.putAll(luceneTracker.deleteFiles(Map.of(e.getKey(), e.getValue())));
-                    }
+        IndexFileDeleter deleter = new IndexFileDeleter(policy, files -> {
+            Map<String, Collection<String>> failed = new java.util.HashMap<>();
+            for (Map.Entry<String, Collection<String>> e : files.entrySet()) {
+                if ("parquet".equals(e.getKey())) {
+                    failed.putAll(parquetTracker.deleteFiles(Map.of(e.getKey(), e.getValue())));
+                } else if ("lucene".equals(e.getKey())) {
+                    failed.putAll(luceneTracker.deleteFiles(Map.of(e.getKey(), e.getValue())));
                 }
-                return failed;
-            },
-            Map.of(),
-            List.of(cs1),
-            null,
-            null
-        );
+            }
+            return failed;
+        }, Map.of(), List.of(cs1), null, null);
 
         // cs2 has completely different files
         Segment seg2 = new Segment(
@@ -612,14 +605,7 @@ public class IndexFileDeleterTests extends OpenSearchTestCase {
 
         CatalogSnapshot cs1 = snapshot(1, List.of(segment(0, "parquet", "old.parquet")), commitUserData(100, 100, "uuid"));
         // Create deleter first, then set up the probe
-        IndexFileDeleter deleter = new IndexFileDeleter(
-            policy,
-            new TrackingFileDeleter(),
-            Map.of(),
-            List.of(cs1),
-            null,
-            null
-        );
+        IndexFileDeleter deleter = new IndexFileDeleter(policy, new TrackingFileDeleter(), Map.of(), List.of(cs1), null, null);
 
         // Now create a new deleter with the lock probe, using the deleter instance as the monitor
         LockProbeDeleter probe = new LockProbeDeleter(deleter);

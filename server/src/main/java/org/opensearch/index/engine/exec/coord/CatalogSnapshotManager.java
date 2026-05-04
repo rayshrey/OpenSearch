@@ -135,6 +135,20 @@ public class CatalogSnapshotManager implements Closeable {
         Segment segmentToAdd = getSegment(mergeResult.getMergedWriterFileSet());
         Set<Segment> segmentsToRemove = new HashSet<>(oneMerge.getSegmentsToMerge());
 
+        // All source segments must exist in the current snapshot
+        assert segmentList.containsAll(segmentsToRemove) : "merge source segments must all exist in the current catalog snapshot";
+
+        // Merged segment generation must not collide with any segment that will be retained
+        assert segmentList.stream()
+            .filter(s -> segmentsToRemove.contains(s) == false)
+            .noneMatch(s -> s.generation() == segmentToAdd.generation()) : "merged segment generation ["
+                + segmentToAdd.generation()
+                + "] collides with a retained segment generation";
+
+        // Row count conservation: merged output must have the same total rows as the inputs
+        assert assertRowCountConservation(segmentsToRemove, segmentToAdd)
+            : "merged segment row count must equal sum of source segment row counts";
+
         boolean inserted = false;
         int newSegIdx = 0;
         for (int segIdx = 0, cnt = segmentList.size(); segIdx < cnt; segIdx++) {
@@ -198,9 +212,6 @@ public class CatalogSnapshotManager implements Closeable {
             latestCatalogSnapshot.getLastWriterGeneration() + 1,
             latestCatalogSnapshot.getUserData()
         );
-        for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
-            listener.afterRefresh(true, newSnapshot);
-        }
 
         // New snapshot generation must be strictly greater than the previous
         assert newSnapshot.getGeneration() > prevGen : "new snapshot generation ["
@@ -221,12 +232,44 @@ public class CatalogSnapshotManager implements Closeable {
         assert assertSegmentGenerationFileConsistency(refreshedSegments)
             : "segment generation-to-file mapping is inconsistent with previous snapshots";
 
+        // No duplicate generations within the same snapshot
+        assert refreshedSegments.stream().map(Segment::generation).distinct().count() == refreshedSegments.size()
+            : "refreshed segments contain duplicate generations";
+
+        // Every segment must have at least one format with files
+        assert refreshedSegments.stream().allMatch(s -> s.dfGroupedSearchableFiles().isEmpty() == false)
+            : "every segment must have at least one format's files";
+
+        // Every WriterFileSet in every segment must have a positive row count
+        assert refreshedSegments.stream().flatMap(s -> s.dfGroupedSearchableFiles().values().stream()).allMatch(wfs -> wfs.numRows() > 0)
+            : "every WriterFileSet must have a positive row count";
+
+        List<CatalogSnapshotLifecycleListener> executed = new ArrayList<>();
+        try {
+            for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
+                listener.afterRefresh(true, newSnapshot);
+                executed.add(listener);
+            }
+        } catch (Exception ex) {
+            // notify that snapshot does not exist anymore
+            try {
+                for (CatalogSnapshotLifecycleListener listener : executed) {
+                    listener.onDeleted(newSnapshot);
+                }
+                executed.clear();
+            } catch (Exception suppressed) {
+                ex.addSuppressed(suppressed);
+            }
+            throw ex;
+        }
+
         try {
             indexFileDeleter.addFileReferences(newSnapshot);
         } catch (IOException e) {
             throw new RuntimeException("Failed to add file references for snapshot [gen=" + newSnapshot.getGeneration() + "]", e);
         }
         catalogSnapshotMap.put(newSnapshot.getGeneration(), newSnapshot);
+
 
         CatalogSnapshot oldSnapshot = latestCatalogSnapshot;
         latestCatalogSnapshot = newSnapshot;
@@ -387,6 +430,29 @@ public class CatalogSnapshotManager implements Closeable {
                     }
                 }
             }
+        }
+        return true;
+    }
+
+    /**
+     * Asserts that the total row count across all formats in the merged segment equals
+     * the total row count across all formats in the source segments. This catches bugs
+     * where rows are silently dropped or duplicated during merge.
+     */
+    private boolean assertRowCountConservation(Set<Segment> sourceSegments, Segment mergedSegment) {
+        long sourceRows = 0;
+        for (Segment seg : sourceSegments) {
+            for (WriterFileSet wfs : seg.dfGroupedSearchableFiles().values()) {
+                sourceRows += wfs.numRows();
+            }
+        }
+        long mergedRows = 0;
+        for (WriterFileSet wfs : mergedSegment.dfGroupedSearchableFiles().values()) {
+            mergedRows += wfs.numRows();
+        }
+        if (sourceRows != mergedRows) {
+            logger.error("Row count mismatch: source segments have {} rows but merged segment has {} rows", sourceRows, mergedRows);
+            return false;
         }
         return true;
     }

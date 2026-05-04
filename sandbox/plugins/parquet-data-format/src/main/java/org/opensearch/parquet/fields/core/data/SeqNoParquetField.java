@@ -28,8 +28,16 @@ public class SeqNoParquetField extends ParquetField {
         assert parseValue instanceof SeqNoFieldMapper.SequenceIdentifiers;
 
         final StructVector structVector = (StructVector) managedVSR.getVector(fieldType.name());
-        final BigIntVector seqNoVector = structVector.addOrGet(SeqNoFieldMapper.NAME, FieldType.notNullable(new ArrowType.Int(64, true)), BigIntVector.class);
-        final BigIntVector primaryTermVector = structVector.addOrGet(SeqNoFieldMapper.PRIMARY_TERM_NAME, FieldType.notNullable(new ArrowType.Int(64, true)), BigIntVector.class);
+        final BigIntVector seqNoVector = structVector.addOrGet(
+            SeqNoFieldMapper.NAME,
+            FieldType.notNullable(new ArrowType.Int(64, true)),
+            BigIntVector.class
+        );
+        final BigIntVector primaryTermVector = structVector.addOrGet(
+            SeqNoFieldMapper.PRIMARY_TERM_NAME,
+            FieldType.notNullable(new ArrowType.Int(64, true)),
+            BigIntVector.class
+        );
 
         seqNoVector.setSafe(managedVSR.getRowCount(), ((SeqNoFieldMapper.SequenceIdentifiers) parseValue).sequenceNumber());
         primaryTermVector.setSafe(managedVSR.getRowCount(), ((SeqNoFieldMapper.SequenceIdentifiers) parseValue).primaryTerm());
