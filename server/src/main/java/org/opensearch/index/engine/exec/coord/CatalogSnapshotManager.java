@@ -204,14 +204,29 @@ public class CatalogSnapshotManager implements Closeable {
         for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
             listener.beforeRefresh();
         }
-        DataformatAwareCatalogSnapshot newSnapshot = new DataformatAwareCatalogSnapshot(
-            latestCatalogSnapshot.getId() + 1,
-            latestCatalogSnapshot.getGeneration() + 1,
-            latestCatalogSnapshot.getVersion(),
-            refreshedSegments,
-            latestCatalogSnapshot.getLastWriterGeneration() + 1,
-            latestCatalogSnapshot.getUserData()
-        );
+
+        DataformatAwareCatalogSnapshot newSnapshot;
+        try {
+            newSnapshot = new DataformatAwareCatalogSnapshot(
+                latestCatalogSnapshot.getId() + 1,
+                latestCatalogSnapshot.getGeneration() + 1,
+                latestCatalogSnapshot.getVersion(),
+                refreshedSegments,
+                latestCatalogSnapshot.getLastWriterGeneration() + 1,
+                latestCatalogSnapshot.getUserData()
+            );
+        } catch (Exception e) {
+            // Construction failed (e.g., OOM) — notify listeners that the refresh did not produce a new snapshot
+            // so they can reset any state prepared in beforeRefresh
+            for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
+                try {
+                    listener.afterRefresh(false, null);
+                } catch (Exception suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+            }
+            throw e;
+        }
 
         // New snapshot generation must be strictly greater than the previous
         assert newSnapshot.getGeneration() > prevGen : "new snapshot generation ["
@@ -244,32 +259,52 @@ public class CatalogSnapshotManager implements Closeable {
         assert refreshedSegments.stream().flatMap(s -> s.dfGroupedSearchableFiles().values().stream()).allMatch(wfs -> wfs.numRows() > 0)
             : "every WriterFileSet must have a positive row count";
 
-        List<CatalogSnapshotLifecycleListener> executed = new ArrayList<>();
+        // Register file references BEFORE notifying listeners and swapping the snapshot.
+        // This ensures that if addFileReferences fails, no listener has been told about
+        // the new snapshot and no state has been mutated.
+        try {
+            indexFileDeleter.addFileReferences(newSnapshot);
+        } catch (IOException e) {
+            // File reference registration failed — notify listeners that refresh did not complete
+            for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
+                try {
+                    listener.afterRefresh(false, null);
+                } catch (Exception suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+            }
+            throw new RuntimeException("Failed to add file references for snapshot [gen=" + newSnapshot.getGeneration() + "]", e);
+        }
+
+        // Now notify listeners — file references are already registered, so even if a listener
+        // fails, the files are tracked and will be cleaned up when the snapshot is deleted.
+        List<CatalogSnapshotLifecycleListener> notified = new ArrayList<>();
         try {
             for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
                 listener.afterRefresh(true, newSnapshot);
-                executed.add(listener);
+                notified.add(listener);
             }
         } catch (Exception ex) {
-            // notify that snapshot does not exist anymore
-            try {
-                for (CatalogSnapshotLifecycleListener listener : executed) {
+            // A listener failed after file references were registered. The snapshot is tracked
+            // by the file deleter but was never made visible as latestCatalogSnapshot.
+            // Notify already-notified listeners that the snapshot is being discarded.
+            for (CatalogSnapshotLifecycleListener listener : notified) {
+                try {
                     listener.onDeleted(newSnapshot);
+                } catch (Exception suppressed) {
+                    ex.addSuppressed(suppressed);
                 }
-                executed.clear();
-            } catch (Exception suppressed) {
+            }
+            // Remove file references since the snapshot will never be used
+            try {
+                indexFileDeleter.removeFileReferences(newSnapshot);
+            } catch (IOException suppressed) {
                 ex.addSuppressed(suppressed);
             }
             throw ex;
         }
 
-        try {
-            indexFileDeleter.addFileReferences(newSnapshot);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to add file references for snapshot [gen=" + newSnapshot.getGeneration() + "]", e);
-        }
         catalogSnapshotMap.put(newSnapshot.getGeneration(), newSnapshot);
-
 
         CatalogSnapshot oldSnapshot = latestCatalogSnapshot;
         latestCatalogSnapshot = newSnapshot;
@@ -359,17 +394,25 @@ public class CatalogSnapshotManager implements Closeable {
         final long gen = snapshot.getGeneration();
         if (snapshot.decRef()) {
             catalogSnapshotMap.remove(gen);
+            Exception firstException = null;
             try {
                 indexFileDeleter.removeFileReferences(snapshot);
             } catch (IOException e) {
-                throw new RuntimeException("Failed to clean up files for snapshot [gen=" + gen + "]", e);
+                firstException = e;
             }
             for (CatalogSnapshotLifecycleListener listener : snapshotListeners) {
                 try {
                     listener.onDeleted(snapshot);
                 } catch (IOException e) {
-                    throw new RuntimeException("Listener failed on snapshot deletion [gen=" + gen + "]", e);
+                    if (firstException == null) {
+                        firstException = e;
+                    } else {
+                        firstException.addSuppressed(e);
+                    }
                 }
+            }
+            if (firstException != null) {
+                throw new RuntimeException("Failed to clean up snapshot [gen=" + gen + "]", firstException);
             }
         }
     }
