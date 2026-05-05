@@ -8,6 +8,8 @@
 
 package org.opensearch.composite;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope;
+
 import org.opensearch.action.admin.indices.refresh.RefreshResponse;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
 import org.opensearch.action.admin.indices.stats.ShardStats;
@@ -48,13 +50,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
-/**
- * Integration tests for composite merge with real Parquet backend.
- *
- * Run with:
- * ./gradlew :sandbox:plugins:composite-engine:internalClusterTest \
- *   --tests "*.CompositeMergeIT" -Dsandbox.enabled=true
- */
+// The Tokio IO runtime worker thread (used by the Rust merge k-way merge sort) is a process-lifetime
+// singleton that persists after tests complete. It polls for new async IO tasks between merges.
+@ThreadLeakScope(ThreadLeakScope.Scope.NONE)
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 1)
 public class CompositeMergeIT extends OpenSearchIntegTestCase {
 

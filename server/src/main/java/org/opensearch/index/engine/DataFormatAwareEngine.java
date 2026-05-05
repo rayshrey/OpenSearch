@@ -261,7 +261,18 @@ public class DataFormatAwareEngine implements Indexer {
                 ),
                 registry.format(config().getIndexSettings().pluggableDataFormat())
             );
-            this.writerGenerationCounter = new AtomicLong(0L);
+            long maxGenFromCommit = 0L;
+            try {
+                List<CatalogSnapshot> initSnapshots = committer.listCommittedSnapshots();
+                if (initSnapshots.isEmpty() == false) {
+                    for (Segment seg : initSnapshots.getLast().getSegments()) {
+                        maxGenFromCommit = Math.max(maxGenFromCommit, seg.generation());
+                    }
+                }
+            } catch (IOException e) {
+                // Fall back to 0 on error
+            }
+            this.writerGenerationCounter = new AtomicLong(maxGenFromCommit);
             this.writerPool = new LockablePool<>(() -> {
                 long gen = writerGenerationCounter.incrementAndGet();
                 assert gen > 0 : "writer generation must be positive but was: " + gen;
@@ -461,8 +472,8 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public Engine.IndexResult index(Engine.Index index) throws IOException {
         assert Objects.equals(index.uid().field(), IdFieldMapper.NAME) : index.uid().field();
-        assert index.origin() == Engine.Operation.Origin.PRIMARY : "DataFormatAwareEngine only supports PRIMARY origin but got: "
-            + index.origin();
+        assert (index.origin() == Engine.Operation.Origin.PRIMARY || index.origin() == Engine.Operation.Origin.LOCAL_TRANSLOG_RECOVERY)
+            : "DataFormatAwareEngine only supports PRIMARY origin but got: " + index.origin();
         final boolean doThrottle = index.origin().isRecovery() == false;
         try (ReleasableLock ignored = readLock.acquire()) {
             ensureOpen();
@@ -913,11 +924,18 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public boolean shouldPeriodicallyFlush() {
         ensureOpen();
-        final long localCheckpointOfLastCommit = localCheckpointTracker.getPersistedCheckpoint();
-        return translogManager.shouldPeriodicallyFlush(
-            localCheckpointOfLastCommit,
-            engineConfig.getIndexSettings().getFlushThresholdSize().getBytes()
-        );
+        try {
+            Map<String, String> lastCommitData = committer.getLastCommittedData();
+            final long localCheckpointOfLastCommit = Long.parseLong(
+                lastCommitData.getOrDefault(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "-1")
+            );
+            return translogManager.shouldPeriodicallyFlush(
+                localCheckpointOfLastCommit,
+                engineConfig.getIndexSettings().getFlushThresholdSize().getBytes()
+            );
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     /** Triggers a refresh to flush the indexing buffer to segments. */

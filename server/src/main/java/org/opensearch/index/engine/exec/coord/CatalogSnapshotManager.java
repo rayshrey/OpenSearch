@@ -359,6 +359,7 @@ public class CatalogSnapshotManager implements Closeable {
         }
         return new GatedConditionalCloseable<>(snapshot, () -> {
             try {
+                snapshot.markCommitted();
                 indexFileDeleter.onCommit(snapshot);
             } catch (IOException e) {
                 throw new RuntimeException("Failed to register commit [gen=" + snapshot.getGeneration() + "]", e);

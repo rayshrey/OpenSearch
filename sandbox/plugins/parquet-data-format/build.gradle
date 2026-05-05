@@ -71,3 +71,10 @@ test {
 tasks.matching { it.name == 'missingJavadoc' }.configureEach {
     enabled = false
 }
+
+tasks.named('forbiddenPatterns').configure {
+    exclude '**/*.dylib'
+    exclude '**/*.so'
+    exclude '**/*.dll'
+    exclude '**/*.parquet'
+}

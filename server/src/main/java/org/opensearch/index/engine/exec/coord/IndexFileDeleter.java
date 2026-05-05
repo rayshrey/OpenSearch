@@ -88,6 +88,7 @@ public class IndexFileDeleter {
             if (cs.tryIncRef() == false) {
                 throw new IllegalStateException("Committed snapshot [gen=" + cs.getGeneration() + "] is already closed");
             }
+            cs.markCommitted();
             this.committedSnapshots.add(cs);
             addFileReferences(cs);
         }
@@ -157,7 +158,7 @@ public class IndexFileDeleter {
         // Delete the commit point (segments_N) BEFORE deleting data files,
         // because deleteCommit may call DirectoryReader.listCommits() which
         // needs to read segment files that are about to be deleted.
-        if (commitFileManager != null) {
+        if (commitFileManager != null && snapshot.isCommitted()) {
             commitFileManager.deleteCommit(snapshot);
         }
         if (filesToDelete.isEmpty() == false) {
