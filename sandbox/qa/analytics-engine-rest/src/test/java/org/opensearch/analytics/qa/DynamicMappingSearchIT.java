@@ -112,6 +112,10 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
 
         // Aggregation across all generations
         assertPplValue("source = " + INDEX + " | stats sum(points) as total", "total", 693.0);
+
+        // Show all rows (SELECT * equivalent) for review
+        Map<String, Object> allRows = executePPL("source = " + INDEX);
+        logger.info("ALL ROWS: {}", allRows);
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -128,7 +132,7 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
             + "  \"index.pluggable.dataformat.enabled\": true,"
             + "  \"index.pluggable.dataformat\": \"composite\","
             + "  \"index.composite.primary_data_format\": \"parquet\","
-            + "  \"index.composite.secondary_data_formats\": \"\""
+            + "  \"index.composite.secondary_data_formats\": \"lucene\""
             + "},"
             + "\"mappings\": {"
             + "  \"properties\": {"
@@ -164,9 +168,19 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
 
     private Map<String, Object> executePPL(String ppl) throws IOException {
         Request req = new Request("POST", "/_analytics/ppl");
-        req.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
+        String requestBody = "{\"query\": \"" + escapeJson(ppl) + "\"}";
+        req.setJsonEntity(requestBody);
         Response response = client().performRequest(req);
-        return assertOkAndParse(response, "PPL: " + ppl);
+        String responseBody = org.opensearch.common.io.Streams.readFully(
+            response.getEntity().getContent()
+        ).utf8ToString();
+        logger.info("PPL REQUEST: {}", requestBody);
+        logger.info("PPL RESPONSE: {}", responseBody);
+        return org.opensearch.common.xcontent.json.JsonXContent.jsonXContent.createParser(
+            org.opensearch.core.xcontent.NamedXContentRegistry.EMPTY,
+            org.opensearch.core.xcontent.DeprecationHandler.THROW_UNSUPPORTED_OPERATION,
+            responseBody
+        ).map();
     }
 
     private void assertPplCount(String ppl, int expected) throws IOException {
