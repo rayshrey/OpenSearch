@@ -112,6 +112,22 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin 
             .addSettingsUpdateConsumer(ParquetSettings.MAX_PER_VSR_ALLOCATION_DIVISOR, v -> this.maxPerVsrAllocationDivisor = v);
         this.nativeAllocator = pluginComponentRegistry.getComponent(ArrowNativeAllocator.class)
             .orElseThrow(() -> new IllegalStateException("ArrowNativeAllocator not available; arrow-base plugin must be installed"));
+
+        // Register virtual pools for Rust-side write and merge memory tracking.
+        // Stats are refreshed on demand when _nodes/stats is called.
+        var writePool = this.nativeAllocator.registerVirtualPool("write", 0);
+        var mergePool = this.nativeAllocator.registerVirtualPool("merge", 0);
+        this.nativeAllocator.setVirtualPoolStatsRefresher(() -> {
+            try {
+                long[] stats = org.opensearch.parquet.bridge.RustBridge.getPoolStats();
+                // Layout: [writeUsed, writePeak, writeLimit, mergeUsed, mergePeak, mergeLimit]
+                writePool.updateStats(stats[0], stats[1]);
+                mergePool.updateStats(stats[3], stats[4]);
+            } catch (Exception e) {
+                // Best-effort — stats may be stale if native lib is unavailable
+            }
+        });
+
         return Collections.emptyList();
     }
 

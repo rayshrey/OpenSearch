@@ -232,4 +232,57 @@ public class ArrowNativeAllocatorTests extends OpenSearchTestCase {
         allocator.setPoolMin("p", 1L);
         assertEquals("dropping min must not shrink live limit", startLimit, pool.getLimit());
     }
+
+    public void testVirtualPoolRegistration() {
+        var handle = allocator.registerVirtualPool("write", 512 * 1024 * 1024);
+        assertNotNull(handle);
+        assertEquals(512 * 1024 * 1024, handle.limit());
+        assertEquals(0, handle.allocatedBytes());
+        assertEquals(0, handle.peakBytes());
+        assertSame(handle, allocator.getVirtualPool("write"));
+    }
+
+    public void testVirtualPoolUpdateStats() {
+        var handle = allocator.registerVirtualPool("merge", 0);
+        handle.updateStats(100_000, 200_000);
+        assertEquals(100_000, handle.allocatedBytes());
+        assertEquals(200_000, handle.peakBytes());
+    }
+
+    public void testVirtualPoolAppearsInStats() {
+        allocator.registerVirtualPool("write", 0);
+        allocator.getVirtualPool("write").updateStats(42, 99);
+
+        NativeAllocatorPoolStats stats = allocator.stats();
+        boolean found = false;
+        for (NativeAllocatorPoolStats.PoolStats ps : stats.getPools()) {
+            if ("write".equals(ps.getName())) {
+                assertEquals(42, ps.getAllocatedBytes());
+                assertEquals(99, ps.getPeakBytes());
+                found = true;
+            }
+        }
+        assertTrue("Virtual pool 'write' should appear in stats", found);
+    }
+
+    public void testStatsRefresherCalledBeforeStats() {
+        var handle = allocator.registerVirtualPool("write", 0);
+        allocator.setVirtualPoolStatsRefresher(() -> handle.updateStats(777, 888));
+
+        NativeAllocatorPoolStats stats = allocator.stats();
+        boolean found = false;
+        for (NativeAllocatorPoolStats.PoolStats ps : stats.getPools()) {
+            if ("write".equals(ps.getName())) {
+                assertEquals(777, ps.getAllocatedBytes());
+                assertEquals(888, ps.getPeakBytes());
+                found = true;
+            }
+        }
+        assertTrue("Refresher should have been called before collecting stats", found);
+    }
+
+    public void testVirtualPoolDoesNotSupportChildren() {
+        var handle = allocator.registerVirtualPool("vp", 0);
+        expectThrows(UnsupportedOperationException.class, () -> handle.newChild("child", 100));
+    }
 }

@@ -45,6 +45,7 @@ public class RustBridge {
     private static final MethodHandle FREE_MERGE_RESULT;
     private static final MethodHandle READ_AS_JSON;
     private static final MethodHandle FREE_ROW_ID_MAPPING;
+    private static final MethodHandle GET_POOL_STATS;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -250,6 +251,11 @@ public class RustBridge {
                 ValueLayout.JAVA_LONG,                         // mapping_ptr
                 ValueLayout.JAVA_LONG                          // mapping_len
             )
+        );
+        // i64 parquet_get_pool_stats(out_ptr, out_cap) → writes 6 × i64
+        GET_POOL_STATS = linker.downcallHandle(
+            lib.find("parquet_get_pool_stats").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG)
         );
     }
 
@@ -686,6 +692,30 @@ public class RustBridge {
             seg.setAtIndex(ValueLayout.JAVA_LONG, i, map.get(keys[i]));
         }
         return new LongMapArrays(call.strArray(keys), seg);
+    }
+
+    /**
+     * Fetches write and merge pool stats from Rust in a single FFM call.
+     * Returns [writeUsed, writePeak, writeLimit, mergeUsed, mergePeak, mergeLimit].
+     */
+    public static long[] getPoolStats() {
+        try (var arena = java.lang.foreign.Arena.ofConfined()) {
+            var buf = arena.allocate(ValueLayout.JAVA_LONG, 6);
+            long rc;
+            try {
+                rc = (long) GET_POOL_STATS.invokeExact(buf, 6L);
+            } catch (Throwable t) {
+                throw new RuntimeException("parquet_get_pool_stats failed", t);
+            }
+            if (rc != 0) {
+                throw new RuntimeException("parquet_get_pool_stats returned error: " + rc);
+            }
+            long[] stats = new long[6];
+            for (int i = 0; i < 6; i++) {
+                stats[i] = buf.getAtIndex(ValueLayout.JAVA_LONG, i);
+            }
+            return stats;
+        }
     }
 
     private RustBridge() {}
