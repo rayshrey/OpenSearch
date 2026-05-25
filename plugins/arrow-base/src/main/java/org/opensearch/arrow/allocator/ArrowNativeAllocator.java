@@ -179,6 +179,11 @@ public class ArrowNativeAllocator implements NativeAllocator {
 
     @Override
     public NativeAllocatorPoolStats stats() {
+        // Refresh Rust-side stats before collecting
+        Runnable refresher = this.virtualPoolStatsRefresher;
+        if (refresher != null) {
+            refresher.run();
+        }
         List<NativeAllocatorPoolStats.PoolStats> poolStats = new ArrayList<>();
         for (var entry : pools.entrySet()) {
             BufferAllocator alloc = entry.getValue().allocator;
@@ -364,7 +369,7 @@ public class ArrowNativeAllocator implements NativeAllocator {
      * without using Arrow's BufferAllocator. The Rust side enforces its own limit locally;
      * this handle provides a unified view in {@link #stats()}.
      */
-    static class VirtualPoolHandle implements PoolHandle {
+    public static class VirtualPoolHandle implements PoolHandle {
 
         private final String name;
         private final long limit;
@@ -428,5 +433,16 @@ public class ArrowNativeAllocator implements NativeAllocator {
      */
     public VirtualPoolHandle getVirtualPool(String poolName) {
         return virtualPools.get(poolName);
+    }
+
+    private volatile Runnable virtualPoolStatsRefresher;
+
+    /**
+     * Registers a callback that refreshes virtual pool stats from the native layer.
+     * Called by the parquet plugin during initialization. The callback is invoked
+     * before stats() to ensure returned values reflect current Rust-side usage.
+     */
+    public void setVirtualPoolStatsRefresher(Runnable refresher) {
+        this.virtualPoolStatsRefresher = refresher;
     }
 }

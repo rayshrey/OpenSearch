@@ -736,6 +736,32 @@ pub extern "C" fn parquet_get_merge_pool_used() -> i64 {
     crate::memory::merge_pool().used() as i64
 }
 
+/// Writes all pool stats into a caller-provided buffer in one FFM call.
+/// Layout (6 × i64 = 48 bytes):
+///   [0]: write_used
+///   [1]: write_peak
+///   [2]: write_limit
+///   [3]: merge_used
+///   [4]: merge_peak
+///   [5]: merge_limit
+///
+/// Returns 0 on success, -1 if buffer too small.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_get_pool_stats(out_ptr: *mut i64, out_cap: i64) -> i64 {
+    if out_cap < 6 {
+        return -1;
+    }
+    let wp = crate::memory::write_pool();
+    let mp = crate::memory::merge_pool();
+    *out_ptr.add(0) = wp.used() as i64;
+    *out_ptr.add(1) = wp.peak() as i64;
+    *out_ptr.add(2) = wp.limit() as i64;
+    *out_ptr.add(3) = mp.used() as i64;
+    *out_ptr.add(4) = mp.peak() as i64;
+    *out_ptr.add(5) = mp.limit() as i64;
+    0
+}
+
 /// Returns peak write pool usage in bytes.
 #[no_mangle]
 pub extern "C" fn parquet_get_write_pool_peak() -> i64 {
