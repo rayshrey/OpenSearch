@@ -14,6 +14,8 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::log_debug;
+use crate::memory::merge_pool;
+use native_bridge_common::memory_pool::MemoryReservation;
 
 use super::context::MergeContext;
 use super::error::MergeResult;
@@ -87,6 +89,8 @@ pub fn merge_unsorted(
     // Build row-ID mapping: for unsorted merge, files are concatenated sequentially.
     // old_row_id maps directly to new_row_id with a per-file offset.
     let total_rows: usize = file_row_counts.iter().sum();
+    let mut reservation = MemoryReservation::new(merge_pool(), "merge_unsorted");
+    reservation.grow(total_rows * std::mem::size_of::<i64>());
     let mut mapping: Vec<i64> = vec![0i64; total_rows];
     let mut gen_keys: Vec<i64> = Vec::with_capacity(input_files.len());
     let mut gen_offsets: Vec<i32> = Vec::with_capacity(input_files.len());

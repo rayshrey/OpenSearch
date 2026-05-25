@@ -14,6 +14,8 @@ use arrow::datatypes::Schema as ArrowSchema;
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::log_debug;
+use crate::memory::merge_pool;
+use native_bridge_common::memory_pool::MemoryReservation;
 
 use super::context::MergeContext;
 use super::cursor::FileCursor;
@@ -112,7 +114,18 @@ pub fn merge_sorted(
     // Row-ID mapping: pre-allocate the flat mapping array and compute offsets
     // from file metadata row counts (known before reading any data).
     let total_rows: usize = file_row_counts.iter().sum();
+    let mut reservation = MemoryReservation::new(merge_pool(), "merge_sorted");
+    // Track mapping vec allocation
+    reservation.grow(total_rows * std::mem::size_of::<i64>());
     let mut mapping: Vec<i64> = vec![0i64; total_rows];
+
+    // Track cursor batch memory: each cursor holds one batch + one prefetched batch
+    for cursor in &cursors {
+        if let Some(batch) = &cursor.current_batch {
+            // 2x: current batch + prefetched next batch in channel
+            reservation.grow(batch.get_array_memory_size() * 2);
+        }
+    }
     let mut gen_keys: Vec<i64> = Vec::with_capacity(num_cursors);
     let mut gen_offsets: Vec<i32> = Vec::with_capacity(num_cursors);
     let mut gen_sizes: Vec<i32> = Vec::with_capacity(num_cursors);

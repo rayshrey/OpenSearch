@@ -22,9 +22,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::{log_error, log_debug, log_info};
 use crate::crc_writer::CrcWriter;
+use crate::memory::write_pool;
 use crate::merge::{merge_sorted, schema::ROW_ID_COLUMN_NAME};
 use crate::native_settings::NativeSettings;
 use crate::writer_properties_builder::WriterPropertiesBuilder;
+use native_bridge_common::memory_pool::MemoryReservation;
 
 /// Result from finalizing a writer: Parquet metadata + whole-file CRC32 + optional sort permutation.
 #[derive(Debug)]
@@ -95,6 +97,8 @@ struct SortingChunkedWriter {
     total_rows: usize,
     /// Writer generation propagated into Parquet file metadata for each chunk.
     writer_generation: i64,
+    /// Memory reservation tracking sort-phase allocations.
+    reservation: MemoryReservation,
 }
 
 impl SortingChunkedWriter {
@@ -108,6 +112,7 @@ impl SortingChunkedWriter {
         nulls_first: Vec<bool>,
         writer_generation: i64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let reservation = MemoryReservation::new(write_pool(), "sorted_writer");
         let mut writer = Self {
             base_path,
             schema,
@@ -125,6 +130,7 @@ impl SortingChunkedWriter {
             chunk_crcs: Vec::new(),
             total_rows: 0,
             writer_generation,
+            reservation,
         };
         writer.open_new_ipc()?;
         Ok(writer)
@@ -233,29 +239,41 @@ impl SortingChunkedWriter {
         let file = File::open(&ipc_path)?;
         let reader = IpcFileReader::try_new(file, None)?;
         let mut batches: Vec<RecordBatch> = Vec::new();
+        let mut batch_bytes: usize = 0;
         for batch_result in reader {
             let batch = batch_result?;
             if batch.num_rows() > 0 {
+                batch_bytes += batch.get_array_memory_size();
                 batches.push(batch);
             }
         }
 
         if batches.is_empty() {
-            // Nothing to sort, just reopen
             let _ = std::fs::remove_file(&ipc_path);
             self.open_new_ipc()?;
             return Ok(());
         }
 
-        // Concat and sort
+        // Reserve for the full sort peak: read-back + concat + sort output coexist briefly.
+        // Peak is ~3x the data: batches(1x) + combined(1x) + sorted(1x).
+        // We reserve 3x upfront, then shrink as intermediates are freed.
+        let sort_peak = batch_bytes * 3;
+        self.reservation.try_grow(sort_peak)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("Write memory limit exceeded during sort (need {} bytes): {}", sort_peak, e).into()
+            })?;
+
+        // Concat all batches into one (peak: batches + combined = 2x)
         let combined = concat_batches(&self.schema, &batches)?;
-        drop(batches); // free memory before sort allocates
+        drop(batches); // free batches → now holding combined + sorted reservation (2x used, 1x freed)
+
+        // Sort (peak: combined + sorted = 2x)
         let sorted_batch = NativeParquetWriter::sort_batch(
             &combined, &self.sort_columns, &self.reverse_sorts, &self.nulls_first,
         )?;
-        drop(combined); // free unsorted data
+        drop(combined); // free combined → now holding only sorted (1x used, 2x freed)
 
-        // Capture original row IDs for permutation building, then rewrite to sequential 0..N
+        // Capture original row IDs for permutation building
         let row_id_col_idx = self.schema.fields().iter().position(|f| f.name() == ROW_ID_COLUMN_NAME);
         let final_batch = if let Some(idx) = row_id_col_idx {
             let row_id_array = sorted_batch.column(idx)
@@ -291,6 +309,11 @@ impl SortingChunkedWriter {
         // Delete the IPC staging file and open a fresh one
         let _ = std::fs::remove_file(&ipc_path);
         self.open_new_ipc()?;
+
+        // Release all sort-phase memory — data is now on disk
+        self.reservation.shrink(sort_peak);
+        // Track chunk_row_ids growth (long-lived until finish())
+        self.reservation.resize(self.memory_size());
         Ok(())
     }
 
@@ -335,6 +358,7 @@ struct WriterState {
     settings: NativeSettings,
     crc_handle: Option<crate::crc_writer::CrcHandle>,
     writer_generation: i64,
+    reservation: MemoryReservation,
 }
 
 /// Path suffix for the intermediate Arrow IPC file used during sort-on-close.
@@ -434,11 +458,14 @@ impl NativeParquetWriter {
             (WriterVariant::Parquet(Arc::new(Mutex::new(writer))), Some(crc_handle))
         };
 
+        let reservation = MemoryReservation::new(write_pool(), "parquet_writer");
+
         WRITERS.insert(temp_filename, WriterState {
             variant,
             settings,
             crc_handle,
             writer_generation,
+            reservation,
         });
 
         Ok(())
@@ -464,17 +491,41 @@ impl NativeParquetWriter {
                 let record_batch = RecordBatch::try_new(schema, struct_array.columns().to_vec())?;
                 log_debug!("Created RecordBatch with {} rows and {} columns", record_batch.num_rows(), record_batch.num_columns());
 
-                if let Some(state) = WRITERS.get_mut(&temp_filename) {
-                    match &state.variant {
-                        WriterVariant::Ipc(writer_arc) => {
-                            log_debug!("Writing RecordBatch to IPC staging file");
-                            let mut writer = writer_arc.lock().unwrap();
-                            writer.write(&record_batch)?;
-                        }
-                        WriterVariant::Parquet(writer_arc) => {
-                            log_debug!("Writing RecordBatch to Parquet file");
-                            let mut writer = writer_arc.lock().unwrap();
-                            writer.write(&record_batch)?;
+                if let Some(mut state) = WRITERS.get_mut(&temp_filename) {
+                    let is_ipc = matches!(&state.variant, WriterVariant::Ipc(_));
+                    if is_ipc {
+                        let writer_arc = match &state.variant {
+                            WriterVariant::Ipc(w) => Arc::clone(w),
+                            _ => unreachable!(),
+                        };
+                        log_debug!("Writing RecordBatch to IPC staging file");
+                        let mut writer = writer_arc.lock().unwrap();
+                        writer.write(&record_batch)?;
+                        // SortingChunkedWriter tracks its own memory via its reservation
+                    } else {
+                        let writer_arc = match &state.variant {
+                            WriterVariant::Parquet(w) => Arc::clone(w),
+                            _ => unreachable!(),
+                        };
+                        log_debug!("Writing RecordBatch to Parquet file");
+
+                        // Write the batch — ArrowWriter encodes into internal buffers
+                        let mut writer = writer_arc.lock().unwrap();
+                        writer.write(&record_batch)?;
+                        let actual_mem = writer.memory_size();
+                        drop(writer);
+
+                        // Now check: try to reserve the actual memory used.
+                        // If over limit, the write already happened but we reject —
+                        // the writer will be dropped (data replayed from translog).
+                        let current = state.reservation.size();
+                        if actual_mem > current {
+                            state.reservation.try_grow(actual_mem - current)
+                                .map_err(|e| -> Box<dyn std::error::Error> {
+                                    format!("Write memory limit exceeded: {}", e).into()
+                                })?;
+                        } else if actual_mem < current {
+                            state.reservation.shrink(current - actual_mem);
                         }
                     }
                     Ok(())
@@ -494,7 +545,7 @@ impl NativeParquetWriter {
         log_debug!("finalize_writer called for file: {} (temp: {})", filename, temp_filename);
 
         if let Some((_, state)) = WRITERS.remove(&temp_filename) {
-            let WriterState { variant, settings, crc_handle, writer_generation } = state;
+            let WriterState { variant, settings, crc_handle, writer_generation, reservation: _reservation } = state;
             let index_name = settings.index_name.as_deref().unwrap_or("");
 
             match variant {
@@ -622,6 +673,10 @@ impl NativeParquetWriter {
             let row_id_mapping = if !chunk_row_ids.is_empty() && !chunk_row_ids[0].is_empty() {
                 let ids = &chunk_row_ids[0];
                 let total = ids.len();
+                // Track mapping allocation in write pool
+                let mapping_bytes = total * std::mem::size_of::<i64>();
+                let mut mapping_reservation = MemoryReservation::new(write_pool(), "finalize_mapping");
+                mapping_reservation.grow(mapping_bytes);
                 let mut mapping = vec![0i64; total];
                 for (new_pos, &old_row_id) in ids.iter().enumerate() {
                     let orig_idx = old_row_id as usize;
@@ -630,6 +685,7 @@ impl NativeParquetWriter {
                     }
                 }
                 Some(mapping)
+                // mapping_reservation dropped here — memory transferred to Java via Box::into_raw
             } else {
                 None
             };
@@ -665,6 +721,9 @@ impl NativeParquetWriter {
         // Build the flat permutation: result[original_row_id] = new_row_id
         let row_id_mapping = if !merge_output.mapping.is_empty() && !chunk_row_ids.is_empty() {
             let total = merge_output.mapping.len();
+            let mapping_bytes = total * std::mem::size_of::<i64>();
+            let mut mapping_reservation = MemoryReservation::new(write_pool(), "finalize_flat_mapping");
+            mapping_reservation.grow(mapping_bytes);
             let mut flat_mapping = vec![0i64; total];
             for i in 0..total {
                 flat_mapping[i] = i as i64;
@@ -782,16 +841,12 @@ impl NativeParquetWriter {
         let mut total_memory = 0;
         for entry in WRITERS.iter() {
             if entry.key().starts_with(&path_prefix) {
-                match &entry.value().variant {
-                    WriterVariant::Parquet(writer_arc) => {
-                        if let Ok(writer) = writer_arc.lock() {
-                            total_memory += writer.memory_size();
-                        }
-                    }
-                    WriterVariant::Ipc(writer_arc) => {
-                        if let Ok(writer) = writer_arc.lock() {
-                            total_memory += writer.memory_size();
-                        }
+                // WriterState.reservation tracks Parquet variant memory
+                total_memory += entry.value().reservation.size();
+                // SortingChunkedWriter has its own reservation tracked in the pool
+                if let WriterVariant::Ipc(writer_arc) = &entry.value().variant {
+                    if let Ok(writer) = writer_arc.lock() {
+                        total_memory += writer.reservation.size();
                     }
                 }
             }
