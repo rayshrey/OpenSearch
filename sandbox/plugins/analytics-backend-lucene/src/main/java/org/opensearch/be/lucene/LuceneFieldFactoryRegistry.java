@@ -9,7 +9,9 @@
 package org.opensearch.be.lucene;
 
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.LongPoint;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.mapper.IdFieldMapper;
@@ -47,8 +49,19 @@ public final class LuceneFieldFactoryRegistry {
         doc.add(new Field(ft.name(), value.toString(), lft));
     };
 
+    /** FieldType for _id: indexed but NOT stored — only needed for term-based deletes. */
+    private static final FieldType ID_FIELD_TYPE;
+    static {
+        ID_FIELD_TYPE = new FieldType();
+        ID_FIELD_TYPE.setTokenized(false);
+        ID_FIELD_TYPE.setIndexOptions(IndexOptions.DOCS);
+        ID_FIELD_TYPE.setStored(false);
+        ID_FIELD_TYPE.setOmitNorms(true);
+        ID_FIELD_TYPE.freeze();
+    }
+
     private static final LuceneFieldFactory ID_FIELD_FACTORY = (doc, ft, value, lft) -> {
-        doc.add(new Field(ft.name(), new BytesRef((byte[]) value), IdFieldMapper.Defaults.FIELD_TYPE));
+        doc.add(new Field(ft.name(), new BytesRef((byte[]) value), ID_FIELD_TYPE));
     };
 
     private static final LuceneFieldFactory SEQ_NO_FIELD_FACTORY = (doc, ft, value, lft) -> {
