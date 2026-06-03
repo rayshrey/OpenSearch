@@ -62,14 +62,14 @@ public final class ParquetSettings {
     /** Compression codec for Parquet files, e.g. ZSTD, SNAPPY, LZ4_RAW (default LZ4_RAW). */
     public static final Setting<String> COMPRESSION_TYPE = Setting.simpleString(
         "index.parquet.compression_type",
-        "LZ4_RAW",
+        "ZSTD",
         Setting.Property.IndexScope
     );
 
     /** Compression level for the chosen codec (default 2, range 1–9). */
     public static final Setting<Integer> COMPRESSION_LEVEL = Setting.intSetting(
         "index.parquet.compression_level",
-        2,
+        3,
         1,
         9,
         Setting.Property.IndexScope

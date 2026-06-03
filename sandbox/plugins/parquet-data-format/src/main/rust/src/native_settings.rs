@@ -46,11 +46,11 @@ impl NativeSettings {
     }
 
     pub fn get_compression_type(&self) -> &str {
-        self.compression_type.as_deref().unwrap_or("LZ4_RAW")
+        self.compression_type.as_deref().unwrap_or("ZSTD")
     }
 
     pub fn get_compression_level(&self) -> i32 {
-        self.compression_level.unwrap_or(2)
+        self.compression_level.unwrap_or(3)
     }
 
     pub fn get_page_size_bytes(&self) -> usize {
