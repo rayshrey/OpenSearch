@@ -69,7 +69,7 @@ public final class ParquetSettings {
     /** Compression level for the chosen codec (default 2, range 1–9). */
     public static final Setting<Integer> COMPRESSION_LEVEL = Setting.intSetting(
         "index.parquet.compression_level",
-        2,
+        3,
         1,
         9,
         Setting.Property.IndexScope

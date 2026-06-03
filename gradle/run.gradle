@@ -38,6 +38,8 @@ def numZones = findProperty('numZones') as Integer ?: 1
 testClusters {
   runTask {
     testDistribution = 'archive'
+    setting 'network.host', '0.0.0.0'
+    setting 'discovery.type', 'single-node'
     if (numZones > 1) numberOfZones = numZones
     if (numNodes > 1) numberOfNodes = numNodes
     if (findProperty("installedPlugins")) {
