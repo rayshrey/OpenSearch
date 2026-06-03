@@ -435,10 +435,12 @@ public class DataFormatAwareEngine implements Indexer {
             this.mergeScheduler = new MergeScheduler(
                 mergeHandler,
                 this::applyMergeChanges,
-                catalogSnapshotManager::incrementUnreferencedFileCleanUps,
+                this::onMergeFailureCleanup,
                 shardId,
                 engineConfig.getIndexSettings(),
-                engineConfig.getThreadPool()
+                engineConfig.getThreadPool(),
+                this::activateThrottling,
+                this::deactivateThrottling
             );
 
             success = true;
@@ -1805,6 +1807,17 @@ public class DataFormatAwareEngine implements Indexer {
         } finally {
             refreshLock.unlock();
         }
+    }
+
+    /**
+     * Releases the refresh lock if held by the current thread and performs catalog cleanup.
+     * Wired as the merge-failure cleanup hook for {@link MergeScheduler}.
+     */
+    private void onMergeFailureCleanup() {
+        if (refreshLock.isHeldByCurrentThread()) {
+            refreshLock.unlock();
+        }
+        catalogSnapshotManager.incrementUnreferencedFileCleanUps();
     }
 
     private void triggerPossibleMerges() {

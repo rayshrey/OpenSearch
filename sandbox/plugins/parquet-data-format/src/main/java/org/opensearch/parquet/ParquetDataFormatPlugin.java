@@ -28,6 +28,7 @@ import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
 import org.opensearch.index.engine.dataformat.StoreStrategy;
 import org.opensearch.index.store.PrecomputedChecksumStrategy;
+import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
 import org.opensearch.parquet.fields.ArrowSchemaBuilder;
@@ -102,6 +103,11 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin 
         this.threadPool = threadPool;
         this.nativeAllocator = pluginComponentRegistry.getComponent(ArrowNativeAllocator.class)
             .orElseThrow(() -> new IllegalStateException("ArrowNativeAllocator not available; arrow-base plugin must be installed"));
+
+        // Set initial merge IO rate and wire dynamic update
+        RustBridge.setMergeIORate(ParquetSettings.MERGE_IO_RATE_SETTING.get(this.settings));
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(ParquetSettings.MERGE_IO_RATE_SETTING, RustBridge::setMergeIORate);
+
         return Collections.emptyList();
     }
 

@@ -168,6 +168,15 @@ public final class ParquetSettings {
         Setting.Property.NodeScope
     );
 
+    /** Merge IO write rate limit in MB/sec. 0 disables throttling. */
+    public static final Setting<Double> MERGE_IO_RATE_SETTING = Setting.doubleSetting(
+        "parquet.native.merge.io_rate_mb_per_sec",
+        20.0,
+        0.0,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     public static final Set<String> VALID_ENCODINGS = Set.of(
         "PLAIN",
         "RLE",
@@ -666,6 +675,7 @@ public final class ParquetSettings {
             MERGE_BATCH_SIZE,
             MERGE_RAYON_THREADS,
             MERGE_IO_THREADS,
+            MERGE_IO_RATE_SETTING,
             ENCODING_FIELD_SETTING,
             ENCODING_VALUE_SETTING,
             COMPRESSION_FIELD_SETTING,

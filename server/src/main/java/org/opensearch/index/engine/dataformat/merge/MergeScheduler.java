@@ -33,7 +33,10 @@ import java.util.function.BiConsumer;
  * This scheduler delegates merge selection to a {@link MergeHandler} and controls
  * concurrency via configurable merge count limits sourced from
  * {@link MergeSchedulerConfig}. Merge tasks are submitted to the OpenSearch
- * {@link ThreadPool} using the {@link ThreadPool.Names#FORCE_MERGE} executor.
+ * {@link ThreadPool} using the {@link ThreadPool.Names#MERGE} executor.
+ * <p>
+ * When pending + active merges exceed the configured max merge count, write
+ * throttling is activated to reduce indexing pressure until merges catch up.
  *
  * @opensearch.experimental
  */
@@ -44,9 +47,13 @@ public class MergeScheduler {
     private final MergeHandler mergeHandler;
     private final BiConsumer<MergeResult, OneMerge> applyMergeChanges;
     private final Runnable onMergeFailureCleanup;
+    private final Runnable activateThrottling;
+    private final Runnable deactivateThrottling;
     private final ThreadPool threadPool;
     private final AtomicInteger activeMerges = new AtomicInteger(0);
+    private final AtomicInteger numMergesInFlight = new AtomicInteger(0);
     private final AtomicBoolean isShutdown = new AtomicBoolean(false);
+    private final AtomicBoolean isThrottling = new AtomicBoolean(false);
     private volatile int maxConcurrentMerges;
     private volatile int maxMergeCount;
     private final MergeSchedulerConfig mergeSchedulerConfig;
@@ -66,10 +73,13 @@ public class MergeScheduler {
      *
      * @param mergeHandler          the handler that selects and executes merges
      * @param applyMergeChanges     callback to apply merge results (e.g., update the catalog)
-     * @param onMergeFailureCleanup callback invoked when a merge fails and cleanup is performed
+     * @param onMergeFailureCleanup callback invoked when a merge fails to release any state
+     *                              acquired by the pre-merge-commit hook (e.g., the refresh lock)
      * @param shardId               the shard this scheduler is associated with
      * @param indexSettings         the index settings providing merge scheduler configuration
      * @param threadPool            the OpenSearch thread pool for executing merge tasks
+     * @param activateThrottling    invoked when merge pressure exceeds the max merge count
+     * @param deactivateThrottling  invoked when merge pressure drops back below the cap
      */
     public MergeScheduler(
         MergeHandler mergeHandler,
@@ -77,12 +87,16 @@ public class MergeScheduler {
         Runnable onMergeFailureCleanup,
         ShardId shardId,
         IndexSettings indexSettings,
-        ThreadPool threadPool
+        ThreadPool threadPool,
+        Runnable activateThrottling,
+        Runnable deactivateThrottling
     ) {
         this.mergeHandler = mergeHandler;
         this.applyMergeChanges = applyMergeChanges;
         this.onMergeFailureCleanup = onMergeFailureCleanup;
         this.threadPool = threadPool;
+        this.activateThrottling = activateThrottling;
+        this.deactivateThrottling = deactivateThrottling;
         logger = Loggers.getLogger(getClass(), shardId);
         this.mergeSchedulerConfig = indexSettings.getMergeSchedulerConfig();
         refreshConfig();
@@ -102,7 +116,7 @@ public class MergeScheduler {
 
         logger.info(
             () -> new ParameterizedMessage(
-                "Updating from merge scheduler config: maxThreadCount {} -> {}, " + "maxMergeCount {} -> {}",
+                "Updating from merge scheduler config: maxThreadCount {} -> {}, maxMergeCount {} -> {}",
                 this.maxConcurrentMerges,
                 newMaxThreadCount,
                 this.maxMergeCount,
@@ -157,8 +171,8 @@ public class MergeScheduler {
                     tookMS = TimeValue.nsecToMSec((System.nanoTime() - timeNS));
                 } catch (Exception e) {
                     logger.error(new ParameterizedMessage("Force merge failed for: {}", oneMerge), e);
+                    runFailureCleanup();
                     mergeHandler.onMergeFailure(oneMerge);
-                    onMergeFailureCleanup.run();
                 } finally {
                     mergeStatsTracker.afterMerge(tookMS, totalNumDocs, totalSizeInBytes);
                 }
@@ -204,6 +218,8 @@ public class MergeScheduler {
         return mergeStatsTracker.toMergeStats(mergeSchedulerConfig.isAutoThrottle() ? getIORateLimitMBPerSec() : Double.POSITIVE_INFINITY);
     }
 
+    // ─── Private ─────────────────────────────────────────────────────────────────
+
     /**
      * Drains the pending-merge queue up to {@link #maxConcurrentMerges},
      * submitting each merge as a task to the thread pool.
@@ -217,14 +233,14 @@ public class MergeScheduler {
             try {
                 submitMergeTask(oneMerge);
             } catch (Exception e) {
+                runFailureCleanup();
                 mergeHandler.onMergeFailure(oneMerge);
-                onMergeFailureCleanup.run();
             }
         }
     }
 
     /**
-     * Submits a merge task to the thread pool's force merge executor.
+     * Submits a merge task to the thread pool's merge executor.
      *
      * @param oneMerge the merge to execute
      */
@@ -242,6 +258,7 @@ public class MergeScheduler {
                 }
 
                 mergeStatsTracker.beforeMerge(totalNumDocs, totalSizeInBytes);
+                maybeActivateThrottle();
 
                 MergeResult mergeResult = mergeHandler.doMerge(oneMerge);
                 applyMergeChanges.accept(mergeResult, oneMerge);
@@ -252,15 +269,57 @@ public class MergeScheduler {
 
             } catch (Exception e) {
                 logger.error(new ParameterizedMessage("Unexpected error during merge for: {}", oneMerge), e);
+                runFailureCleanup();
                 mergeHandler.onMergeFailure(oneMerge);
-                onMergeFailureCleanup.run();
             } finally {
                 mergeStatsTracker.afterMerge(tookMS, totalNumDocs, totalSizeInBytes);
 
                 activeMerges.decrementAndGet();
+                maybeDeactivateThrottle();
                 // A completed merge may free up capacity for new merges, so check again.
                 executeMerge();
             }
         });
+    }
+
+    /**
+     * Increments the in-flight counter and activates write throttling when it exceeds
+     * the configured max merge count.
+     */
+    private synchronized void maybeActivateThrottle() {
+        int inFlight = numMergesInFlight.incrementAndGet();
+        if (inFlight > maxMergeCount) {
+            if (isThrottling.getAndSet(true) == false) {
+                logger.debug("now throttling indexing: numMergesInFlight={}, maxMergeCount={}", inFlight, maxMergeCount);
+                activateThrottling.run();
+            }
+        }
+    }
+
+    /**
+     * Decrements the in-flight counter and deactivates write throttling when it drops
+     * back below the configured max merge count.
+     */
+    private synchronized void maybeDeactivateThrottle() {
+        int inFlight = numMergesInFlight.decrementAndGet();
+        if (inFlight < maxMergeCount) {
+            if (isThrottling.getAndSet(false)) {
+                logger.debug("stop throttling indexing: numMergesInFlight={}, maxMergeCount={}", inFlight, maxMergeCount);
+                deactivateThrottling.run();
+            }
+        }
+    }
+
+    /**
+     * Releases any state that the pre-merge-commit hook may have acquired on the current
+     * merge thread. Invoked before {@link MergeHandler#onMergeFailure(OneMerge)} so that
+     * failure paths do not leak resources that block subsequent refreshes.
+     */
+    private void runFailureCleanup() {
+        try {
+            onMergeFailureCleanup.run();
+        } catch (Exception e) {
+            logger.warn("merge-failure cleanup threw; continuing failure handling", e);
+        }
     }
 }

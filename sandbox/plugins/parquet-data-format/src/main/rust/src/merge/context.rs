@@ -26,7 +26,7 @@ use crate::{log_debug, SETTINGS_STORE};
 
 use super::error::{MergeError, MergeResult};
 use super::io_task::{
-    get_merge_pool, spawn_io_task, IoCommand, RATE_LIMIT_MB_PER_SEC,
+    get_merge_pool, spawn_io_task, IoCommand,
 };
 use super::schema::{append_row_id, build_parquet_root_schema, ROW_ID_COLUMN_NAME};
 
@@ -93,7 +93,7 @@ impl MergeContext {
 
         let output_file = File::create(output_path)?;
         let throttled_writer =
-            RateLimitedWriter::new(output_file, RATE_LIMIT_MB_PER_SEC).map_err(MergeError::Io)?;
+            RateLimitedWriter::new(output_file, crate::node_settings::get_merge_io_rate()).map_err(MergeError::Io)?;
 
         let (crc_writer, crc_handle) = CrcWriter::new(throttled_writer);
 

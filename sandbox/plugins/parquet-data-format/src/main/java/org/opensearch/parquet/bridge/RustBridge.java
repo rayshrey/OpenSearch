@@ -45,6 +45,8 @@ public class RustBridge {
     private static final MethodHandle FREE_MERGE_RESULT;
     private static final MethodHandle READ_AS_JSON;
     private static final MethodHandle FREE_ROW_ID_MAPPING;
+    private static final MethodHandle SET_MERGE_IO_RATE;
+    private static final MethodHandle GET_MERGE_IO_RATE;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -250,6 +252,14 @@ public class RustBridge {
                 ValueLayout.JAVA_LONG,                         // mapping_ptr
                 ValueLayout.JAVA_LONG                          // mapping_len
             )
+        );
+        SET_MERGE_IO_RATE = linker.downcallHandle(
+            lib.find("parquet_set_merge_io_rate").orElseThrow(),
+            FunctionDescriptor.ofVoid(ValueLayout.JAVA_DOUBLE)
+        );
+        GET_MERGE_IO_RATE = linker.downcallHandle(
+            lib.find("parquet_get_merge_io_rate").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE)
         );
     }
 
@@ -490,6 +500,28 @@ public class RustBridge {
         try (var call = new NativeCall()) {
             var idx = call.str(indexName);
             call.invoke(REMOVE_SETTINGS, idx.segment(), idx.len());
+        }
+    }
+
+    /**
+     * Sets the merge IO rate in MB/sec. Affects newly started merges.
+     */
+    public static void setMergeIORate(double mbPerSec) {
+        try {
+            SET_MERGE_IO_RATE.invokeExact(mbPerSec);
+        } catch (Throwable e) {
+            throw new RuntimeException("Failed to set merge IO rate", e);
+        }
+    }
+
+    /**
+     * Gets the current merge IO rate in MB/sec from the native side.
+     */
+    public static double getMergeIORate() {
+        try {
+            return (double) GET_MERGE_IO_RATE.invokeExact();
+        } catch (Throwable e) {
+            throw new RuntimeException("Failed to get merge IO rate", e);
         }
     }
 

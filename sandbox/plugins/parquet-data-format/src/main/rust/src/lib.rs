@@ -15,6 +15,7 @@ mod tests;
 pub mod writer;
 pub mod ffm;
 pub mod native_settings;
+pub mod node_settings;
 pub mod field_config;
 pub mod writer_properties_builder;
 pub mod rate_limited_writer;

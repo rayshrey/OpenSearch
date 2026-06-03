@@ -694,3 +694,19 @@ pub unsafe extern "C" fn parquet_free_row_id_mapping(
         let _ = Box::from_raw(slice::from_raw_parts_mut(mapping_ptr as *mut i64, mapping_len as usize));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Node-level settings
+// ---------------------------------------------------------------------------
+
+/// Set merge IO rate in MB/sec. Called by Java via FFM.
+#[no_mangle]
+pub extern "C" fn parquet_set_merge_io_rate(mb_per_sec: f64) {
+    crate::node_settings::set_merge_io_rate(mb_per_sec);
+}
+
+/// Get current merge IO rate in MB/sec. Called by Java via FFM for testing/verification.
+#[no_mangle]
+pub extern "C" fn parquet_get_merge_io_rate() -> f64 {
+    crate::node_settings::get_merge_io_rate()
+}

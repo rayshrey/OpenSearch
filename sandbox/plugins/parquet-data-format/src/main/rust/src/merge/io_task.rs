@@ -28,7 +28,7 @@ use super::error::{MergeError, MergeResult};
 // =============================================================================
 
 /// Disk write rate limit in MB/s.
-pub const RATE_LIMIT_MB_PER_SEC: f64 = 20.0;
+
 
 /// Default thread count for merge pools: max(1, num_cpus / 8).
 fn default_merge_threads() -> usize {

@@ -153,7 +153,9 @@ public class MergeTests extends OpenSearchTestCase {
             () -> {},
             SHARD_ID,
             idxSettings,
-            mockThreadPool()
+            mockThreadPool(),
+            () -> {},
+            () -> {}
         );
     }
 
@@ -375,7 +377,9 @@ public class MergeTests extends OpenSearchTestCase {
             () -> {},
             SHARD_ID,
             idxSettings,
-            mockThreadPool()
+            mockThreadPool(),
+            () -> {},
+            () -> {}
         );
         scheduler.enableAutoIOThrottle();
         assertNotNull(scheduler.stats());
@@ -403,7 +407,9 @@ public class MergeTests extends OpenSearchTestCase {
             () -> {},
             SHARD_ID,
             mergeSchedulerSettings(),
-            mockThreadPool()
+            mockThreadPool(),
+            () -> {},
+            () -> {}
         );
 
         scheduler.triggerMerges();
@@ -428,7 +434,9 @@ public class MergeTests extends OpenSearchTestCase {
             () -> {},
             SHARD_ID,
             mergeSchedulerSettings(),
-            mockThreadPool()
+            mockThreadPool(),
+            () -> {},
+            () -> {}
         );
 
         scheduler.triggerMerges();
@@ -450,7 +458,7 @@ public class MergeTests extends OpenSearchTestCase {
         MergeScheduler scheduler = new MergeScheduler(handler, (mr, om) -> {
             captured.set(mr);
             latch.countDown();
-        }, () -> {}, SHARD_ID, mergeSchedulerSettings(), mockThreadPool());
+        }, () -> {}, SHARD_ID, mergeSchedulerSettings(), mockThreadPool(), () -> {}, () -> {});
 
         scheduler.forceMerge(1);
         assertTrue(latch.await(5, TimeUnit.SECONDS));
@@ -466,5 +474,56 @@ public class MergeTests extends OpenSearchTestCase {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    public void testThrottlingNotActivatedWhenMergesBelowMaxCount() throws Exception {
+        List<Segment> segments = createSegments(15);
+        MockDataFormat format = new MockDataFormat();
+        WriterFileSet mergedWfs = new WriterFileSet(createTempDir().toString(), 99L, Set.of("merged.dat"), 15, 0L);
+        MergeResult mergeResult = new MergeResult(Map.of(format, mergedWfs));
+        AtomicBoolean throttleActivated = new AtomicBoolean(false);
+        CountDownLatch mergeDone = new CountDownLatch(1);
+
+        Merger merger = mergeInput -> mergeResult;
+        MergeHandler handler = createHandlerWithRealPolicy(snapshotSupplierOf(segments), merger);
+
+        // maxMergeCount=6: a single merge (in-flight=1) won't exceed 6
+        MergeScheduler scheduler = new MergeScheduler(
+            handler,
+            (mr, om) -> mergeDone.countDown(),
+            () -> {},
+            SHARD_ID,
+            mergeSchedulerSettings(),
+            mockThreadPool(),
+            () -> throttleActivated.set(true),
+            () -> {}
+        );
+
+        scheduler.triggerMerges();
+        assertTrue("merge should complete", mergeDone.await(5, TimeUnit.SECONDS));
+        Thread.sleep(200);
+        assertFalse("throttling should NOT activate with single merge below maxMergeCount", throttleActivated.get());
+    }
+
+    public void testFailureCleanupRunsOnMergeException() throws Exception {
+        List<Segment> segments = createSegments(15);
+        CountDownLatch cleanupCalled = new CountDownLatch(1);
+
+        Merger failingMerger = mergeInput -> { throw new IOException("simulated merge failure"); };
+        MergeHandler handler = createHandlerWithRealPolicy(snapshotSupplierOf(segments), failingMerger);
+
+        MergeScheduler scheduler = new MergeScheduler(
+            handler,
+            (mr, om) -> {},
+            () -> cleanupCalled.countDown(),
+            SHARD_ID,
+            mergeSchedulerSettings(),
+            mockThreadPool(),
+            () -> {},
+            () -> {}
+        );
+
+        scheduler.triggerMerges();
+        assertTrue("onMergeFailureCleanup must be called on merge failure", cleanupCalled.await(5, TimeUnit.SECONDS));
     }
 }
