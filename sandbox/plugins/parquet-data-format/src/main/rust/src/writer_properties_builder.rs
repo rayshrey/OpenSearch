@@ -294,7 +294,7 @@ impl WriterPropertiesBuilder {
             Encoding::RLE_DICTIONARY => !matches!(dt, Boolean),
             Encoding::RLE => matches!(dt, Boolean),
             Encoding::DELTA_BINARY_PACKED => matches!(dt,
-                Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64
+                Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Timestamp(_, _)
             ),
             Encoding::DELTA_LENGTH_BYTE_ARRAY => matches!(dt,
                 Utf8 | LargeUtf8 | Binary | LargeBinary
