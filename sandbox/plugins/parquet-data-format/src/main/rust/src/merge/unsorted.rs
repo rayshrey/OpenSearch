@@ -10,10 +10,12 @@ use std::fs::File;
 
 use arrow::array::RecordBatchReader;
 use arrow::datatypes::Schema as ArrowSchema;
+use native_bridge_common::memory_pool::{MemoryReservation, PoolBehavior, MERGE_WAIT_TIMEOUT};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::schema::types::SchemaDescriptor;
 
-use crate::log_debug;
+use crate::{log_debug, log_info};
+use crate::memory::merge_pool;
 
 use super::context::MergeContext;
 use super::error::MergeResult;
@@ -26,6 +28,18 @@ pub fn merge_unsorted(
     output_path: &str,
     index_name: &str,
     output_writer_generation: i64,
+) -> MergeResult<super::MergeOutput> {
+    let mut reservation = MemoryReservation::new(merge_pool(), "merge_unsorted", PoolBehavior::Wait(MERGE_WAIT_TIMEOUT));
+    merge_unsorted_with_pool(input_files, output_path, index_name, output_writer_generation, &mut reservation)
+}
+
+/// Unsorted merge with an explicit memory reservation.
+pub fn merge_unsorted_with_pool(
+    input_files: &[String],
+    output_path: &str,
+    index_name: &str,
+    output_writer_generation: i64,
+    reservation: &mut MemoryReservation,
 ) -> MergeResult<super::MergeOutput> {
     let config = crate::writer::SETTINGS_STORE
         .get(index_name)
@@ -68,6 +82,7 @@ pub fn merge_unsorted(
         file_generations.push(generation);
     }
 
+    let ctx_reservation = reservation.child("merge:flush");
     let mut ctx = MergeContext::new(
         arrow_schemas.clone(),
         &parquet_descriptors,
@@ -77,6 +92,7 @@ pub fn merge_unsorted(
         rayon_threads,
         io_threads,
         output_writer_generation,
+        ctx_reservation,
     )?;
 
     // Precompute column mappings per reader
@@ -108,9 +124,26 @@ pub fn merge_unsorted(
         let file_start_row_id = new_row_id;
 
         let col_mapping = &col_mappings[file_idx];
+        let mut batch_tracked: usize = 0;
         for batch_result in reader {
             let batch = batch_result?;
             let num_rows = batch.num_rows();
+            let batch_bytes = batch.get_array_memory_size();
+            if batch_tracked == 0 {
+                reservation.grow(batch_bytes);
+                batch_tracked = batch_bytes;
+                log_info!(
+                    "[POOL:MERGE] unsorted reader GROW first batch: file_idx={}, bytes={}, pool_used={}",
+                    file_idx, batch_bytes, reservation.pool().used()
+                );
+            } else if batch_bytes != batch_tracked {
+                if batch_bytes > batch_tracked {
+                    reservation.grow(batch_bytes - batch_tracked);
+                } else {
+                    reservation.shrink(batch_tracked - batch_bytes);
+                }
+                batch_tracked = batch_bytes;
+            }
             // Record mapping: each row in this batch gets the next sequential new_row_id
             for _ in 0..num_rows {
                 mapping[mapping_offset] = new_row_id;
@@ -119,6 +152,12 @@ pub fn merge_unsorted(
             }
             ctx.push_batch(col_mapping.pad_batch(&batch)?)?;
         }
+        // File done — release batch memory
+        reservation.shrink(batch_tracked);
+        log_info!(
+            "[POOL:MERGE] unsorted reader SHRINK file done: file_idx={}, freed={}, pool_used={}",
+            file_idx, batch_tracked, reservation.pool().used()
+        );
 
         let file_rows = (new_row_id - file_start_row_id) as i32;
         gen_sizes.push(file_rows);

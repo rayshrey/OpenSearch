@@ -14,6 +14,10 @@ use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::schema::types::SchemaDescriptor;
 
+use native_bridge_common::memory_pool::MemoryReservation;
+
+use crate::log_info;
+
 use super::error::{MergeError, MergeResult};
 use super::heap::{get_sort_values, SortKey};
 use super::io_task::get_merge_pool;
@@ -34,6 +38,7 @@ pub struct FileCursor {
     pub sort_col_indices: Vec<usize>,
     pub sort_col_types: Vec<ArrowDataType>,
     pub nulls_first: Vec<bool>,
+    current_batch_bytes: usize,
 }
 
 impl FileCursor {
@@ -47,6 +52,7 @@ impl FileCursor {
         sort_columns: &[String],
         nulls_first: &[bool],
         batch_size: usize,
+        reservation: &mut MemoryReservation,
     ) -> MergeResult<(Self, Arc<ArrowSchema>, SchemaDescriptor, i64, usize)> {
         let file = File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -125,7 +131,18 @@ impl FileCursor {
             sort_col_indices,
             sort_col_types,
             nulls_first: nulls_first.to_vec(),
+            current_batch_bytes: 0,
         };
+
+        // Track memory for current batch + prefetch buffer (estimate 2x first batch)
+        let batch_bytes = cursor.current_batch.as_ref().unwrap().get_array_memory_size();
+        let cursor_estimate = batch_bytes * 2;
+        reservation.grow(cursor_estimate);
+        cursor.current_batch_bytes = batch_bytes;
+        log_info!(
+            "[POOL:MERGE] cursor OPEN: file_id={}, batch_bytes={}, cursor_reserve={}, pool_used={}",
+            file_id, batch_bytes, cursor_estimate, reservation.pool().used()
+        );
 
         cursor.start_prefetch();
 
@@ -152,23 +169,36 @@ impl FileCursor {
         });
     }
 
-    pub fn load_next_batch(&mut self) -> MergeResult<bool> {
+    pub fn load_next_batch(&mut self, reservation: &mut MemoryReservation) -> MergeResult<bool> {
+        let old_bytes = self.current_batch_bytes;
         self.current_batch = None;
 
         match self.prefetch_rx.recv() {
             Ok(Some(Ok(batch))) => {
+                let new_bytes = batch.get_array_memory_size();
                 self.current_batch = Some(batch);
                 self.row_idx = 0;
                 self.prefetch_pending = false;
                 self.start_prefetch();
+                // Adjust reservation by delta
+                if new_bytes > old_bytes {
+                    reservation.grow(new_bytes - old_bytes);
+                } else if new_bytes < old_bytes {
+                    reservation.shrink(old_bytes - new_bytes);
+                }
+                self.current_batch_bytes = new_bytes;
                 Ok(true)
             }
             Ok(Some(Err(e))) => {
                 self.prefetch_pending = false;
+                reservation.shrink(old_bytes);
+                self.current_batch_bytes = 0;
                 Err(e)
             }
             Ok(None) | Err(_) => {
                 self.prefetch_pending = false;
+                reservation.shrink(old_bytes);
+                self.current_batch_bytes = 0;
                 Ok(false)
             }
         }
@@ -208,20 +238,20 @@ impl FileCursor {
         self.current_batch.as_ref().unwrap().slice(start, len)
     }
 
-    pub fn advance(&mut self) -> MergeResult<bool> {
+    pub fn advance(&mut self, reservation: &mut MemoryReservation) -> MergeResult<bool> {
         if self.current_batch.is_none() {
             return Ok(false);
         }
         self.row_idx += 1;
         if self.row_idx >= self.current_batch.as_ref().unwrap().num_rows() {
             self.current_batch = None;
-            return self.load_next_batch();
+            return self.load_next_batch(reservation);
         }
         Ok(true)
     }
 
-    pub fn advance_past_batch(&mut self) -> MergeResult<bool> {
+    pub fn advance_past_batch(&mut self, reservation: &mut MemoryReservation) -> MergeResult<bool> {
         self.current_batch = None;
-        self.load_next_batch()
+        self.load_next_batch(reservation)
     }
 }

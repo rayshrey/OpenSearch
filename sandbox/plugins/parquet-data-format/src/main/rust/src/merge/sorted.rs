@@ -11,9 +11,11 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
+use native_bridge_common::memory_pool::{MemoryReservation, PoolBehavior, MERGE_WAIT_TIMEOUT};
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::log_debug;
+use crate::memory::merge_pool;
 
 use super::context::MergeContext;
 use super::cursor::FileCursor;
@@ -30,6 +32,21 @@ pub fn merge_sorted(
     reverse_sorts: &[bool],
     nulls_first: &[bool],
     output_writer_generation: i64,
+) -> super::MergeResult<super::MergeOutput> {
+    let mut reservation = MemoryReservation::new(merge_pool(), "merge_sorted", PoolBehavior::Wait(MERGE_WAIT_TIMEOUT));
+    merge_sorted_with_pool(input_files, output_path, index_name, sort_columns, reverse_sorts, nulls_first, output_writer_generation, &mut reservation)
+}
+
+/// Performs a streaming k-way merge using the provided memory reservation.
+pub fn merge_sorted_with_pool(
+    input_files: &[String],
+    output_path: &str,
+    index_name: &str,
+    sort_columns: &[String],
+    reverse_sorts: &[bool],
+    nulls_first: &[bool],
+    output_writer_generation: i64,
+    reservation: &mut MemoryReservation,
 ) -> super::MergeResult<super::MergeOutput> {
     let config = crate::writer::SETTINGS_STORE
         .get(index_name)
@@ -82,7 +99,7 @@ pub fn merge_sorted(
     for (file_id, path) in input_files.iter().enumerate() {
         log_debug!("[RUST] Opening cursor {} for file: {}", file_id, path);
         let (cursor, projected_schema, parquet_descr, generation, row_count) =
-            FileCursor::new(path, file_id, sort_columns, nulls_first, batch_size)?;
+            FileCursor::new(path, file_id, sort_columns, nulls_first, batch_size, reservation)?;
         cursors.push(cursor);
         arrow_schemas.push(projected_schema.as_ref().clone());
         parquet_descriptors.push(parquet_descr);
@@ -93,6 +110,7 @@ pub fn merge_sorted(
     let num_cursors = cursors.len();
 
     // ── Phase 2: Create MergeContext (union schemas, writer, IO task) ───
+    let ctx_reservation = reservation.child("merge:flush");
     let mut ctx = MergeContext::new(
         arrow_schemas.clone(),
         &parquet_descriptors,
@@ -102,6 +120,7 @@ pub fn merge_sorted(
         rayon_threads,
         io_threads,
         output_writer_generation,
+        ctx_reservation,
     )?;
 
     // Precompute column mappings per cursor (avoids per-batch name lookups)
@@ -168,7 +187,7 @@ pub fn merge_sorted(
                     }
                     ctx.push_batch(col_mapping.pad_batch(&slice)?)?;
                 }
-                if !cursor.advance_past_batch()? {
+                if !cursor.advance_past_batch(reservation)? {
                     break;
                 }
             }
@@ -195,7 +214,7 @@ pub fn merge_sorted(
                 }
                 ctx.push_batch(col_mapping.pad_batch(&slice)?)?;
 
-                if !cursor.advance_past_batch()? {
+                if !cursor.advance_past_batch(reservation)? {
                     break;
                 }
                 // Check if cursor should yield after loading new batch
@@ -249,7 +268,7 @@ pub fn merge_sorted(
             }
 
             cursor.row_idx = run_end;
-            if !cursor.advance()? {
+            if !cursor.advance(reservation)? {
                 break;
             }
 

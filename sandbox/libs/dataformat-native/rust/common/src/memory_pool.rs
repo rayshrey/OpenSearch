@@ -269,6 +269,37 @@ impl MemoryReservation {
         self.size -= actual;
     }
 
+    /// Reserve an estimated amount. Returns the estimated amount for later use with `reconcile()`.
+    pub fn reserve_estimated(&mut self, estimated: usize) -> Result<usize, Box<dyn std::error::Error>> {
+        self.request(estimated)?;
+        Ok(estimated)
+    }
+
+    /// Reconcile a previous estimate with the actual measured size.
+    /// If actual > estimated: infallible grow for the delta.
+    /// If actual < estimated: shrink the excess.
+    pub fn reconcile(&mut self, estimated: usize, actual: usize) {
+        if actual > estimated {
+            self.grow(actual - estimated);
+        } else if actual < estimated {
+            self.shrink(estimated - actual);
+        }
+    }
+
+    /// Resize to a new total. Grows or shrinks as needed (infallible).
+    pub fn resize(&mut self, new_total: usize) {
+        if new_total > self.size {
+            self.grow(new_total - self.size);
+        } else if new_total < self.size {
+            self.shrink(self.size - new_total);
+        }
+    }
+
+    /// Returns a reference to the underlying pool.
+    pub fn pool(&self) -> &Arc<MemoryPool> {
+        &self.pool
+    }
+
     /// Release all memory back to the pool.
     pub fn free(&mut self) -> usize {
         let s = self.size;

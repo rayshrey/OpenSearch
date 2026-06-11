@@ -554,6 +554,12 @@ pub unsafe extern "C" fn parquet_merge_files(
     let mapping = result.mapping.into_boxed_slice();
     *out_mapping_len = mapping.len() as i64;
     *out_mapping_ptr = Box::into_raw(mapping) as *mut i64 as i64;
+    let mapping_track_bytes = *out_mapping_len as usize * std::mem::size_of::<i64>();
+    crate::memory::merge_pool().grow(mapping_track_bytes);
+    crate::log_info!(
+        "[POOL:MERGE] parquet_merge_files GROW mapping to Java: bytes={}, pool_used={}",
+        mapping_track_bytes, crate::memory::merge_pool().used()
+    );
 
     let count = result.gen_keys.len();
     let keys = result.gen_keys.into_boxed_slice();
@@ -583,6 +589,12 @@ pub unsafe extern "C" fn parquet_free_merge_result(
     gen_count: i64,
 ) {
     if mapping_ptr != 0 && mapping_len > 0 {
+        let mapping_bytes = mapping_len as usize * std::mem::size_of::<i64>();
+        crate::memory::merge_pool().shrink(mapping_bytes);
+        crate::log_info!(
+            "[POOL:MERGE] parquet_free_merge_result SHRINK: bytes={}, pool_used={}",
+            mapping_bytes, crate::memory::merge_pool().used()
+        );
         let _ = Box::from_raw(slice::from_raw_parts_mut(mapping_ptr as *mut i64, mapping_len as usize));
     }
     let n = gen_count as usize;
@@ -689,6 +701,12 @@ pub unsafe extern "C" fn parquet_free_row_id_mapping(
     mapping_len: i64,
 ) {
     if mapping_ptr != 0 && mapping_len > 0 {
+        let mapping_bytes = mapping_len as usize * std::mem::size_of::<i64>();
+        crate::memory::write_pool().shrink(mapping_bytes);
+        crate::log_info!(
+            "[POOL:WRITE] parquet_free_row_id_mapping SHRINK: bytes={}, pool_used={}",
+            mapping_bytes, crate::memory::write_pool().used()
+        );
         let _ = Box::from_raw(slice::from_raw_parts_mut(mapping_ptr as *mut i64, mapping_len as usize));
     }
 }

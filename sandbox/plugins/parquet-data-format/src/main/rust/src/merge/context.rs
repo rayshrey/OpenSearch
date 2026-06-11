@@ -22,7 +22,9 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use crate::crc_writer::CrcWriter;
 use crate::rate_limited_writer::RateLimitedWriter;
 use crate::writer_properties_builder::WriterPropertiesBuilder;
-use crate::{log_debug, SETTINGS_STORE};
+use crate::{log_debug, log_info, SETTINGS_STORE};
+
+use native_bridge_common::memory_pool::MemoryReservation;
 
 use super::error::{MergeError, MergeResult};
 use super::io_task::{
@@ -49,6 +51,7 @@ pub struct MergeContext {
     // Java side (see NativeParquetMergeStrategy + ParquetShardStatsTracker).
     flush_and_sort_chunk_count: i64,
     flush_and_sort_chunk_time_millis: i64,
+    reservation: MemoryReservation,
 }
 
 impl MergeContext {
@@ -63,6 +66,7 @@ impl MergeContext {
         rayon_threads: Option<usize>,
         io_threads: Option<usize>,
         output_writer_generation: i64,
+        reservation: MemoryReservation,
     ) -> MergeResult<Self> {
         if let Some(parent) = Path::new(output_path).parent() {
             if !parent.exists() {
@@ -127,6 +131,7 @@ impl MergeContext {
             rayon_threads,
             flush_and_sort_chunk_count: 0,
             flush_and_sort_chunk_time_millis: 0,
+            reservation,
         })
     }
 
@@ -175,8 +180,23 @@ impl MergeContext {
         };
         let n = merged.num_rows();
 
+        let merged_bytes = merged.get_array_memory_size();
+        log_info!(
+            "[POOL:MERGE] flush REQUEST concat: merged_bytes={}, rows={}, reservation_size={}, pool_used={}",
+            merged_bytes, n, self.reservation.size(), self.reservation.pool().used()
+        );
+        if let Err(e) = self.reservation.request(merged_bytes) {
+            return Err(MergeError::Logic(format!("Merge pool exceeded (concat): {}", e)));
+        }
+
         let with_id = append_row_id(&merged, self.next_row_id, &self.output_schema)?;
+        let with_id_bytes = with_id.get_array_memory_size();
+        if let Err(e) = self.reservation.request(with_id_bytes) {
+            return Err(MergeError::Logic(format!("Merge pool exceeded (row_id): {}", e)));
+        }
+
         drop(merged);
+        self.reservation.shrink(merged_bytes);
 
         let col_writers = self
             .rg_writer_factory
@@ -215,6 +235,12 @@ impl MergeContext {
         self.io_tx
             .blocking_send(IoCommand::WriteRowGroup(encoded_chunks))
             .map_err(|_| MergeError::Logic("IO task terminated unexpectedly".into()))?;
+
+        self.reservation.shrink(with_id_bytes);
+        log_info!(
+            "[POOL:MERGE] flush DONE: row_group={}, rows={}, reservation_size={}, pool_used={}",
+            self.row_group_index, n, self.reservation.size(), self.reservation.pool().used()
+        );
 
         self.row_group_index += 1;
         self.next_row_id += n as i64;
