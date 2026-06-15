@@ -35,10 +35,14 @@ pub struct FileCursor {
     sort_prefetch_pending: bool,
     pub sort_batch: Option<RecordBatch>,
 
-    data_reader: Option<parquet::arrow::arrow_reader::ParquetRecordBatchReader>,
+    // Deferred mode: open/read/drop per row group instead of holding reader open.
+    // Sort batch_size = row_group_size, so 1 sort batch = 1 row group = 1 data read.
+    data_file_path: Option<String>,
+    data_projection_indices: Option<Vec<usize>>,
     data_batch: Option<RecordBatch>,
     sort_batch_index: usize,
-    data_batch_index: usize,
+    /// Row group that data_batch was loaded from (usize::MAX = not loaded)
+    data_batch_rg: usize,
     deferred: bool,
 
     pub row_idx: usize,
@@ -95,6 +99,15 @@ impl FileCursor {
         // Data projection: all columns except __row_id__
         let data_projection_indices = projection_indices_excluding_row_id(&schema);
 
+        // In deferred mode, use row_group_size as sort batch_size so 1 batch = 1 row group.
+        let num_row_groups = builder.metadata().num_row_groups();
+        let rg_rows = if num_row_groups > 0 {
+            builder.metadata().row_group(0).num_rows() as usize
+        } else {
+            batch_size
+        };
+        let sort_batch_size = if deferred { rg_rows } else { batch_size };
+
         // Build sort reader (sort-only in deferred, all-columns in eager)
         let file1 = File::open(path)?;
         let builder1 = ParquetRecordBatchReaderBuilder::try_new(file1)?;
@@ -106,19 +119,7 @@ impl FileCursor {
         } else {
             parquet::arrow::ProjectionMask::roots(builder1.parquet_schema(), data_projection_indices.clone())
         };
-        let mut sort_reader = builder1.with_batch_size(batch_size).with_projection(sort_projection).build()?;
-
-        // Build data reader (only in deferred mode)
-        let data_reader = if deferred {
-            let file2 = File::open(path)?;
-            let builder2 = ParquetRecordBatchReaderBuilder::try_new(file2)?;
-            let data_proj = parquet::arrow::ProjectionMask::roots(
-                builder2.parquet_schema(), data_projection_indices.clone(),
-            );
-            Some(builder2.with_batch_size(batch_size).with_projection(data_proj).build()?)
-        } else {
-            None
-        };
+        let mut sort_reader = builder1.with_batch_size(sort_batch_size).with_projection(sort_projection).build()?;
 
         // Projected schema from file metadata
         let projected_schema = Arc::new(ArrowSchema::new(
@@ -155,10 +156,11 @@ impl FileCursor {
             sort_prefetch_tx,
             sort_prefetch_pending: false,
             sort_batch: Some(first_sort_batch),
-            data_reader,
+            data_file_path: if deferred { Some(path.to_string()) } else { None },
+            data_projection_indices: if deferred { Some(data_projection_indices) } else { None },
             data_batch: None,
             sort_batch_index: 0,
-            data_batch_index: 0,
+            data_batch_rg: usize::MAX,
             deferred,
             row_idx: 0,
             file_id,
@@ -210,7 +212,10 @@ impl FileCursor {
             reservation.shrink(self.current_data_batch_bytes);
             self.current_data_batch_bytes = 0;
         }
-        self.data_batch = None;
+        // Drop data batch — new sort batch = new row group, frees decode buffers
+        if self.deferred {
+            self.data_batch = None;
+        }
 
         let sort_result = match self.sort_prefetch_rx.recv() {
             Ok(Some(Ok(batch))) => Some(batch),
@@ -241,7 +246,6 @@ impl FileCursor {
                 Ok(true)
             }
             None => {
-                self.data_reader = None; // Release file descriptor
                 reservation.shrink(old_bytes);
                 self.current_batch_bytes = 0;
                 Ok(false)
@@ -253,29 +257,14 @@ impl FileCursor {
         if !self.deferred {
             return Ok(());
         }
-        if self.data_batch.is_some() && self.data_batch_index == self.sort_batch_index + 1 {
+
+        // sort_batch_index IS the row group index (1 batch = 1 row group)
+        let target_rg = self.sort_batch_index;
+
+        // Fast path: already loaded for this row group
+        if self.data_batch.is_some() && self.data_batch_rg == target_rg {
             return Ok(());
         }
-
-        match self.try_load_data(reservation) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // Close the data reader on failure — the cursor is irrecoverable since
-                // the reader's internal position is unknown after a partial advance.
-                self.data_reader = None;
-                self.data_batch = None;
-                if self.current_data_batch_bytes > 0 {
-                    reservation.shrink(self.current_data_batch_bytes);
-                    self.current_data_batch_bytes = 0;
-                }
-                Err(e)
-            }
-        }
-    }
-
-    fn try_load_data(&mut self, reservation: &mut MemoryReservation) -> MergeResult<()> {
-        let reader = self.data_reader.as_mut()
-            .ok_or_else(|| MergeError::Logic("Data reader already closed".into()))?;
 
         // Release previous data_batch memory
         if self.current_data_batch_bytes > 0 {
@@ -284,40 +273,46 @@ impl FileCursor {
         }
         self.data_batch = None;
 
-        while self.data_batch_index <= self.sort_batch_index {
-            match reader.next() {
-                Some(Ok(batch)) => {
-                    if batch.num_rows() == 0 {
-                        return Err(MergeError::Logic(format!(
-                            "Data reader returned empty batch at position {}",
-                            self.data_batch_index
-                        )));
-                    }
-                    if self.data_batch_index == self.sort_batch_index {
-                        // Target batch — validate and keep
-                        if let Some(ref sb) = self.sort_batch {
-                            if batch.num_rows() != sb.num_rows() {
-                                return Err(MergeError::Logic(format!(
-                                    "Data batch rows ({}) != sort batch rows ({}) at index {}",
-                                    batch.num_rows(), sb.num_rows(), self.sort_batch_index
-                                )));
-                            }
-                        }
-                        let data_bytes = batch.get_array_memory_size();
-                        reservation.grow(data_bytes);
-                        self.current_data_batch_bytes = data_bytes;
-                        self.data_batch = Some(batch);
-                    }
-                    // Skipped batch — discard
-                    self.data_batch_index += 1;
-                }
-                Some(Err(e)) => return Err(e.into()),
-                None => return Err(MergeError::Logic(format!(
-                    "Data reader exhausted at position {}, needed sort_batch_index={}",
-                    self.data_batch_index, self.sort_batch_index
-                ))),
-            }
-        }
+        // Open a fresh reader scoped to exactly this row group, read, then drop.
+        // Footer re-read is served from OS page cache (negligible cost on EBS).
+        let file_path = self.data_file_path.as_ref()
+            .ok_or_else(|| MergeError::Logic("Deferred mode but no file path".into()))?;
+        let proj_indices = self.data_projection_indices.as_ref()
+            .ok_or_else(|| MergeError::Logic("Deferred mode but no projection".into()))?;
+
+        let file = File::open(file_path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+
+        let rg_row_count = builder.metadata()
+            .row_group(target_rg)
+            .num_rows() as usize;
+
+        let projection = parquet::arrow::ProjectionMask::roots(
+            builder.parquet_schema(),
+            proj_indices.clone(),
+        );
+
+        let mut reader = builder
+            .with_batch_size(rg_row_count) // read entire row group in one batch
+            .with_projection(projection)
+            .with_row_groups(vec![target_rg])
+            .build()?;
+
+        let batch = match reader.next() {
+            Some(Ok(b)) if b.num_rows() > 0 => b,
+            Some(Err(e)) => return Err(e.into()),
+            _ => return Err(MergeError::Logic(format!(
+                "Data reader returned no rows for row group {}", target_rg
+            ))),
+        };
+
+        let data_bytes = batch.get_array_memory_size();
+        reservation.grow(data_bytes);
+        self.current_data_batch_bytes = data_bytes;
+        self.data_batch = Some(batch);
+        self.data_batch_rg = target_rg;
+
+        // reader drops here — all parquet-rs decode buffers freed immediately
         Ok(())
     }
 
@@ -346,6 +341,7 @@ impl FileCursor {
             self.ensure_data_loaded(reservation)?;
             let batch = self.data_batch.as_ref()
                 .ok_or_else(|| MergeError::Logic("Data batch not loaded".into()))?;
+            // 1 sort batch = 1 row group = 1 data batch, so offsets align directly
             Ok(batch.slice(start, len))
         } else {
             let batch = self.sort_batch.as_ref()

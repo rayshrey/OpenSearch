@@ -115,7 +115,7 @@ impl NativeSettings {
     }
 
     pub fn get_merge_deferred_column_threshold(&self) -> usize {
-        self.merge_deferred_column_threshold.unwrap_or(0)
+        self.merge_deferred_column_threshold.unwrap_or(3)
     }
 }
 
