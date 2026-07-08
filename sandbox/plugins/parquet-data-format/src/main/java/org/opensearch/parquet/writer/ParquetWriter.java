@@ -8,6 +8,7 @@
 
 package org.opensearch.parquet.writer;
 
+import org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -147,11 +148,15 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
             throw new IllegalStateException("Writer is not active, state=" + state);
         }
         return StatsRecorder.recordTimeMillis(() -> {
-            // Schema mismatch is recoverable: the VSR rejected the doc pre-admission, so the
-            // caller-driven rollback no-ops in the VSR and restores ACTIVE.
+            // Per-doc failures are recoverable and must be returned as a Failure (not thrown) so the
+            // engine drives rollbackTo and keeps the shard alive:
+            // - MismatchedInputException: the VSR rejected the doc pre-admission (schema mismatch).
+            // - Arrow OutOfMemoryException: the ingest pool is exhausted mid-admission. This is a
+            // memory-pressure backpressure signal, not a fatal error, so we surface it as a
+            // recoverable per-doc Failure and let the caller roll back to the last good row count.
             try {
                 vsrManager.addDocument(d);
-            } catch (MismatchedInputException e) {
+            } catch (MismatchedInputException | OutOfMemoryException e) {
                 state = WriterState.PENDING_ROLLBACK;
                 return new WriteResult.Failure(e, -1, -1, -1);
             }
