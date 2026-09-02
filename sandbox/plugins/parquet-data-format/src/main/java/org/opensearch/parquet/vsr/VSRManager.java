@@ -373,6 +373,15 @@ public class VSRManager implements AutoCloseable {
                 activeVSR.addFieldVector(schemaField);
                 changed = true;
             } else if (existingVector.getField().equals(schemaField) == false) {
+                logger.info(
+                    "reconcileSchema mismatch for field [{}]: existingVector child names={} (type={}), schemaField child names={} (type={}), fieldsEqual={}",
+                    schemaField.getName(),
+                    existingVector.getField().getChildren().stream().map(Field::getName).collect(java.util.stream.Collectors.toList()),
+                    existingVector.getField().getType(),
+                    schemaField.getChildren().stream().map(Field::getName).collect(java.util.stream.Collectors.toList()),
+                    schemaField.getType(),
+                    existingVector.getField().equals(schemaField)
+                );
                 throw new SchemaChangeRequiresWriterRotationException(
                     schemaField.getName(),
                     existingVector.getField().getType(),

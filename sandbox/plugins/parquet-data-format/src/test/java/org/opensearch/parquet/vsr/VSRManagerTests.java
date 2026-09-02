@@ -728,6 +728,42 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
     }
 
+    /**
+     * Reproduces the false-positive schema-fence bug. Once a LIST column exists in the active VSR,
+     * a later {@link VSRManager#reconcileSchema} call for an UNCHANGED list field (accompanied by a
+     * brand-new scalar field) must take the in-place "add missing field" fast-path and must NOT
+     * rotate the writer.
+     * <p>
+     * It currently throws {@link SchemaChangeRequiresWriterRotationException} because
+     * {@code reconcileSchema} compares the existing {@code ListVector}'s own field — whose child
+     * Arrow Java has renamed to {@code $data$} — against the freshly built schema field whose child
+     * is {@code element}. Those are never equal, so an unchanged LIST column is misread as a type
+     * change on every mapping-version bump.
+     */
+    public void testReconcileSchemaDoesNotSpuriouslyRotateForUnchangedListColumn() throws Exception {
+        String filePath = createTempDir().resolve("reconcile-idempotent.parquet").toString();
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
+        try {
+            // First reconcile introduces the LIST column "tags" (plus val + metadata fields).
+            assertTrue(manager.reconcileSchema(schemaWithMultiValue("tags")));
+
+            // Second reconcile: the SAME LIST "tags" (rebuilt identically) plus one new scalar field,
+            // exactly as would happen when an unrelated field is dynamically mapped after promotion.
+            List<Field> nextFields = new ArrayList<>(schema.getFields());
+            nextFields.addAll(metadataFields());
+            nextFields.add(new KeywordParquetField().toArrowField("tags", true)); // unchanged LIST column
+            nextFields.add(new Field("newField", FieldType.nullable(new ArrowType.Utf8()), null)); // new scalar
+
+            // Desired behaviour: unchanged LIST is a no-op, the new scalar field is added in place.
+            // The bug makes reconcileSchema throw before either assertion is reached.
+            boolean changed = manager.reconcileSchema(new Schema(nextFields));
+            assertTrue("new field should have been added in place without a writer rotation", changed);
+            assertNotNull("new scalar field must be present in the active VSR", manager.getActiveManagedVSR().getVector("newField"));
+        } finally {
+            manager.close();
+        }
+    }
+
     /** Reads back the elements of one row of a list vector. */
     private static List<String> listElements(ListVector listVector, int row) {
         int start = listVector.getOffsetBuffer().getInt((long) row * 4);
