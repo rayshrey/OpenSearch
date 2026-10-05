@@ -164,6 +164,83 @@ public class DataFormatAwareEngine implements Indexer {
     private final DocumentCountTracker documentCountTracker;
     private final AtomicLong pendingRowCount = new AtomicLong();
     private final LockablePool<DefaultLockableHolder<Writer<?>>> writerPool;
+
+    /**
+     * Upper bound on documents appended through one reserved writer before it is returned to the pool's available
+     * queue and a fresh one is polled, so writers keep rotating at the same cadence as before.
+     */
+    static final int WRITER_RESERVATION_MAX_DOCS = 256;
+
+    /**
+     * The writer a write thread used for its last index operation on this engine. It is polled from the pool once and
+     * then kept out of the pool's available queue -- but UNLOCKED -- between operations, so no other write thread can
+     * take it while a refresh or close ({@code writerPool.checkoutAll()}) still can, exactly as before. Each operation
+     * re-locks it with an uncontended {@code tryLock} and verifies it is still the pool's ACTIVE writer: a writer the
+     * refresh checked out is closed (no longer ACTIVE and no longer registered) and is simply forgotten. This replaces
+     * a {@code getAndLock}/{@code releaseAndUnlock} pair through the pool's striped queue per document, plus the
+     * pool-monitor {@code isRegistered} lookup, with one CAS per document. Needs no bulk boundary: an idle thread's
+     * reservation is harmless, since the writer stays registered and is flushed by the next refresh like any other.
+     */
+    private static final class ReservedWriter {
+        @Nullable
+        private DefaultLockableHolder<Writer<?>> holder;
+        private int docs;
+    }
+
+    private final ThreadLocal<ReservedWriter> reservedWriter = ThreadLocal.withInitial(ReservedWriter::new);
+
+    /**
+     * Locks this thread's reserved writer for one operation if it is still usable, else drops the reservation.
+     * Returns {@code null} when the caller must poll the pool instead: the reservation was empty, the writer is being
+     * checked out right now ({@code tryLock} fails), the refresh already took it (no longer registered), or -- for an
+     * index operation -- it reached {@link #WRITER_RESERVATION_MAX_DOCS} or no longer fits the mapping version (then it
+     * goes back to the pool's available queue). A registered writer that left ACTIVE is returned locked to an index
+     * operation, which retires it exactly like a freshly polled one; a delete returns it to the pool instead.
+     */
+    @Nullable
+    private DefaultLockableHolder<Writer<?>> lockReservedWriter(ReservedWriter reserved, boolean forIndex, long mappingVersion) {
+        final DefaultLockableHolder<Writer<?>> candidate = reserved.holder;
+        if (candidate == null) {
+            return null;
+        }
+        if (candidate.tryLock() == false) {
+            reserved.holder = null;
+            return null;
+        }
+        if (writerPool.isRegistered(candidate) == false) {
+            reserved.holder = null;
+            candidate.unlock();
+            return null;
+        }
+        final Writer<?> w = candidate.get();
+        if (w.state() != WriterState.ACTIVE) {
+            reserved.holder = null;
+            if (forIndex) {
+                return candidate;
+            }
+            writerPool.releaseAndUnlock(candidate);
+            return null;
+        }
+        final boolean fits = w.isSchemaMutable() || w.mappingVersion() >= mappingVersion;
+        if (forIndex && (reserved.docs >= WRITER_RESERVATION_MAX_DOCS || fits == false)) {
+            reserved.holder = null;
+            reserved.docs = 0;
+            writerPool.releaseAndUnlock(candidate);
+            return null;
+        }
+        return candidate;
+    }
+
+    /** Unlocks a registered writer this thread just used and keeps it reserved (out of the pool's available queue). */
+    private static void reserve(ReservedWriter reserved, DefaultLockableHolder<Writer<?>> holder) {
+        if (reserved.holder != holder) {
+            reserved.holder = holder;
+            reserved.docs = 0;
+        }
+        reserved.docs++;
+        holder.unlock();
+    }
+
     private final AtomicLong writerGenerationCounter;
 
     private final Map<DataFormat, EngineReaderManager<?>> readerManagers;
@@ -727,17 +804,25 @@ public class DataFormatAwareEngine implements Indexer {
         assert index.primaryTerm() > 0 : "primary term must be positive but was: " + index.primaryTerm();
         DefaultLockableHolder<Writer<?>> lockedWriter = null;
         boolean writerCheckedOut = false;
+        boolean engineFailedHere = false;
         long mappingVersion = currentMappingVersion();
+        final ReservedWriter reserved = reservedWriter.get();
+        lockedWriter = lockReservedWriter(reserved, true, mappingVersion);
         try {
-            lockedWriter = writerPool.getAndLock(h -> {
-                Writer<?> w = h.get();
-                if (w.state() != WriterState.ACTIVE) return false;
-                return w.isSchemaMutable() || w.mappingVersion() >= mappingVersion;
-            });
+            if (lockedWriter == null) {
+                lockedWriter = writerPool.getAndLock(h -> {
+                    Writer<?> w = h.get();
+                    if (w.state() != WriterState.ACTIVE) return false;
+                    return w.isSchemaMutable() || w.mappingVersion() >= mappingVersion;
+                });
+            }
             Writer currentWriter = lockedWriter.get();
             currentWriter.updateMappingVersion(mappingVersion);
             if (currentWriter.state() != WriterState.ACTIVE) {
-                writerCheckedOut = retireWriterIfNeeded(lockedWriter);
+                // A non-ACTIVE writer either leaves the pool here or retireWriterIfNeeded throws after checking it
+                // out; either way it must not be released back, so flag it before the call.
+                writerCheckedOut = true;
+                retireWriterIfNeeded(lockedWriter);
                 lockedWriter = null;
                 return indexIntoEngine(index, plan);
             }
@@ -786,15 +871,37 @@ public class DataFormatAwareEngine implements Indexer {
             // self-rollback, or PENDING_ROLLBACK awaiting CompositeWriter rollback). Anything thrown
             // means we don't know the writer's buffer state and cannot safely retire it —
             // fail the engine and let recovery replay the translog.
+            engineFailedHere = true;
             failEngine("uncaught exception during indexing id[" + index.id() + "] seq#[" + index.seqNo() + "]", e);
             throw e;
         } finally {
             if (lockedWriter != null) {
-                // Invariant: writerCheckedOut ⇒ writer no longer registered in the pool.
-                assert writerCheckedOut == false || writerPool.isRegistered(lockedWriter) == false
-                    : "writer claimed checked-out but still registered in pool";
-                if (writerPool.isRegistered(lockedWriter)) {
-                    writerPool.releaseAndUnlock(lockedWriter);
+                if (engineFailedHere) {
+                    // closeNoLock on this thread has checked every writer out (re-entering our lock), so the pool may
+                    // no longer know this writer: hand it back if it does, otherwise just drop our lock count.
+                    if (reserved.holder == lockedWriter) {
+                        reserved.holder = null;
+                    }
+                    if (writerCheckedOut == false) {
+                        if (writerPool.isRegistered(lockedWriter)) {
+                            writerPool.releaseAndUnlock(lockedWriter);
+                        } else {
+                            lockedWriter.unlock();
+                        }
+                    }
+                } else {
+                    // Invariant: writerCheckedOut ⇔ writer no longer registered in the pool. The flag replaces the
+                    // per-document isRegistered lookup; the registration check survives as an assertion.
+                    assert writerCheckedOut != writerPool.isRegistered(lockedWriter) : "writerCheckedOut="
+                        + writerCheckedOut
+                        + " disagrees with pool registration";
+                    if (writerCheckedOut) {
+                        if (reserved.holder == lockedWriter) {
+                            reserved.holder = null;
+                        }
+                    } else {
+                        reserve(reserved, lockedWriter);
+                    }
                 }
             }
         }
@@ -1063,8 +1170,13 @@ public class DataFormatAwareEngine implements Indexer {
      * (locked only for the generation context; no document is added), mapping its {@link DeleteResult}.
      */
     private Engine.DeleteResult deleteInEngine(Engine.Delete delete, DeletionStrategy plan) throws IOException {
-        // Deletes need only an active writer for generation context; they do not apply mappings.
-        DefaultLockableHolder<Writer<?>> lockedWriter = writerPool.getAndLock(h -> h.get().state() == WriterState.ACTIVE);
+        // Deletes need only an active writer for generation context; they do not apply mappings. Prefer the writer this
+        // thread has reserved, so a delete never makes the pool create an extra (empty) writer beside it.
+        final ReservedWriter reserved = reservedWriter.get();
+        DefaultLockableHolder<Writer<?>> lockedWriter = lockReservedWriter(reserved, false, 0L);
+        if (lockedWriter == null) {
+            lockedWriter = writerPool.getAndLock(h -> h.get().state() == WriterState.ACTIVE);
+        }
         try {
             Writer<?> currentWriter = lockedWriter.get();
             DeleteResult deleteResult = deleteExecutionEngine.deleteDocument(
@@ -1078,7 +1190,9 @@ public class DataFormatAwareEngine implements Indexer {
             return new Engine.DeleteResult(f.cause(), plan.version, delete.primaryTerm(), delete.seqNo(), false);
         } finally {
             if (writerPool.isRegistered(lockedWriter)) {
-                writerPool.releaseAndUnlock(lockedWriter);
+                reserve(reserved, lockedWriter);
+            } else {
+                lockedWriter.unlock();
             }
         }
     }

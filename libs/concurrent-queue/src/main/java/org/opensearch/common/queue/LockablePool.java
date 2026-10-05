@@ -14,12 +14,12 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -53,7 +53,9 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      * @param concurrency   the concurrency level (number of stripes)
      */
     public LockablePool(Supplier<T> itemSupplier, Supplier<Queue<T>> queueSupplier, int concurrency) {
-        this.items = Collections.newSetFromMap(new IdentityHashMap<>());
+        // Identity-keyed (holders do not override equals) and concurrent so isRegistered is a lock-free read;
+        // mutations stay under the pool monitor.
+        this.items = Collections.newSetFromMap(new ConcurrentHashMap<>());
         this.itemSupplier = Objects.requireNonNull(itemSupplier, "itemSupplier must not be null");
         this.availableItems = new LockableConcurrentQueue<>(queueSupplier, concurrency);
     }
@@ -178,7 +180,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      * @param item item to validate
      * @return true if the item is part of this pool
      */
-    public synchronized boolean isRegistered(T item) {
+    public boolean isRegistered(T item) {
         return items.contains(item);
     }
 

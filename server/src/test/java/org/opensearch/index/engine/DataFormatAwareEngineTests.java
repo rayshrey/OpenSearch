@@ -5651,4 +5651,60 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
             engine.refresh("after-rejected-delete");
         }
     }
+
+    /**
+     * A write thread reserves its writer between index operations but leaves it unlocked, so an engine close from
+     * another thread must complete while the indexing thread is idle, and the next op on that thread must fail cleanly
+     * rather than touch the closed writer.
+     */
+    public void testReservedWriterDoesNotBlockCloseAndIsForgottenAfterIt() throws Exception {
+        final DataFormatAwareEngine engine = createDFAEngine(store, createTempDir());
+        boolean closed = false;
+        try {
+            engine.index(indexOp(createParsedDocWithInput("1", null)));
+            engine.index(indexOp(createParsedDocWithInput("2", null)));
+
+            final AtomicReference<Exception> failure = new AtomicReference<>();
+            final Thread closer = new Thread(() -> {
+                try {
+                    engine.close();
+                } catch (Exception e) {
+                    failure.set(e);
+                }
+            }, "engine-closer");
+            closer.start();
+            closer.join(TimeUnit.SECONDS.toMillis(30));
+            closed = true;
+            assertFalse("close must not wait on an idle thread's reserved writer", closer.isAlive());
+            assertNull("close must not fail", failure.get());
+
+            expectThrows(AlreadyClosedException.class, () -> engine.index(indexOp(createParsedDocWithInput("3", null))));
+        } finally {
+            if (closed == false) {
+                engine.close();
+            }
+        }
+    }
+
+    /** A refresh from another thread takes the reserved writer; the indexing thread re-polls and every doc lands. */
+    public void testReservedWriterSurvivesConcurrentRefreshAndRotatesPastDocCap() throws Exception {
+        try (DataFormatAwareEngine engine = createDFAEngine(store, createTempDir())) {
+            final int numDocs = DataFormatAwareEngine.WRITER_RESERVATION_MAX_DOCS * 2 + 7;
+            final int refreshAt = DataFormatAwareEngine.WRITER_RESERVATION_MAX_DOCS / 2;
+            for (int i = 0; i < numDocs; i++) {
+                final Engine.IndexResult result = engine.index(indexOp(createParsedDocWithInput(Integer.toString(i), null)));
+                assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+                if (i == refreshAt) {
+                    final Thread refresher = new Thread(() -> engine.refresh("concurrent"), "refresher");
+                    refresher.start();
+                    refresher.join(TimeUnit.SECONDS.toMillis(30));
+                    assertFalse("a refresh must not wait on an idle thread's reserved writer", refresher.isAlive());
+                }
+            }
+            engine.refresh("test");
+            try (GatedCloseable<CatalogSnapshot> ref = engine.acquireSnapshot()) {
+                assertThat(ref.get().getNumDocs(), equalTo((long) numDocs));
+            }
+        }
+    }
 }
