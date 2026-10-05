@@ -36,7 +36,8 @@ import java.util.function.Supplier;
  *       but remain tracked by the pool and included in {@link #checkoutAll()}.</li>
  * </ul>
  *
- * @param <T> the pooled item type, must implement {@link Lockable}
+ * @param <T> the pooled item type, must implement {@link Lockable} and retain {@link Object}'s identity-based
+ *            {@code equals} and {@code hashCode} implementations
  */
 public final class LockablePool<T extends Lockable> implements Iterable<T>, Closeable {
 
@@ -53,8 +54,8 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      * @param concurrency   the concurrency level (number of stripes)
      */
     public LockablePool(Supplier<T> itemSupplier, Supplier<Queue<T>> queueSupplier, int concurrency) {
-        // Identity-keyed (holders do not override equals) and concurrent so isRegistered is a lock-free read;
-        // mutations stay under the pool monitor.
+        // Lockables are validated once at creation to retain Object identity equality. The concurrent set then gives
+        // isRegistered a lock-free, allocation-free read; mutations stay under the pool monitor.
         this.items = Collections.newSetFromMap(new ConcurrentHashMap<>());
         this.itemSupplier = Objects.requireNonNull(itemSupplier, "itemSupplier must not be null");
         this.availableItems = new LockableConcurrentQueue<>(queueSupplier, concurrency);
@@ -81,7 +82,15 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      */
     public T getAndLock(Predicate<T> isCompatible) {
         ensureOpen();
-        return Objects.requireNonNullElseGet(availableItems.lockAndPollWithRejects(isCompatible), this::fetchItem);
+        final T item = availableItems.lockAndPollWithRejects(isCompatible);
+        if (item == null) {
+            return fetchItem();
+        }
+        if (closed) {
+            item.unlock();
+            throw new IllegalStateException("LockablePool is already closed");
+        }
+        return item;
     }
 
     /**
@@ -108,10 +117,25 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
 
     private synchronized T fetchItem() {
         ensureOpen();
-        T item = itemSupplier.get();
+        T item = Objects.requireNonNull(itemSupplier.get(), "itemSupplier must not return null");
+        ensureIdentityEquality(item);
         item.lock();
         items.add(item);
         return item;
+    }
+
+    private static void ensureIdentityEquality(Object item) {
+        try {
+            final Class<?> type = item.getClass();
+            if (type.getMethod("equals", Object.class).getDeclaringClass() != Object.class
+                || type.getMethod("hashCode").getDeclaringClass() != Object.class) {
+                throw new IllegalArgumentException(
+                    "Pooled Lockable type [" + type.getName() + "] must use Object identity equality and hash codes"
+                );
+            }
+        } catch (NoSuchMethodException e) {
+            throw new AssertionError("Object equality methods must be available", e);
+        }
     }
 
     /**
@@ -151,10 +175,36 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      * @throws IllegalStateException if the pool is closed
      */
     public List<T> checkoutAll(Consumer<T> onCheckout) {
-        ensureOpen();
+        final List<T> snapshot;
+        synchronized (this) {
+            ensureOpen();
+            snapshot = List.copyOf(items);
+        }
+        return checkoutAll(snapshot, onCheckout);
+    }
+
+    /**
+     * Atomically closes admission and checks out every item registered before closure. A concurrent creator either
+     * registers its item before this method snapshots the pool, in which case this method waits for and returns it,
+     * or observes the closed state and fails without creating an item.
+     *
+     * @return unmodifiable list of all checked-out items
+     * @throws IllegalStateException if the pool is already closed
+     */
+    public List<T> closeAndCheckoutAll() {
+        final List<T> snapshot;
+        synchronized (this) {
+            ensureOpen();
+            closed = true;
+            snapshot = List.copyOf(items);
+        }
+        return checkoutAll(snapshot, t -> {});
+    }
+
+    private List<T> checkoutAll(List<T> snapshot, Consumer<T> onCheckout) {
         List<T> lockedItems = new ArrayList<>();
         List<T> checkedOutItems = new ArrayList<>();
-        for (T item : this) {
+        for (T item : snapshot) {
             item.lock();
             lockedItems.add(item);
         }

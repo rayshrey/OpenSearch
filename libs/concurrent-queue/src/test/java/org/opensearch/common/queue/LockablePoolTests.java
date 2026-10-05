@@ -14,7 +14,12 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static org.hamcrest.Matchers.containsString;
 
 /**
  * Tests for {@link LockablePool}.
@@ -49,6 +54,22 @@ public class LockablePoolTests extends OpenSearchTestCase {
 
         boolean isHeldByCurrentThread() {
             return delegate.isHeldByCurrentThread();
+        }
+    }
+
+    static class ValueEqualLockableEntry extends LockableEntry {
+        ValueEqualLockableEntry(String id) {
+            super(id);
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof ValueEqualLockableEntry other && id.equals(other.id);
+        }
+
+        @Override
+        public int hashCode() {
+            return id.hashCode();
         }
     }
 
@@ -143,6 +164,72 @@ public class LockablePoolTests extends OpenSearchTestCase {
 
         IllegalStateException ex = expectThrows(IllegalStateException.class, pool::checkoutAll);
         assertEquals("LockablePool is already closed", ex.getMessage());
+    }
+
+    public void testRejectsLockableWithValueEquality() {
+        LockablePool<ValueEqualLockableEntry> pool = new LockablePool<>(() -> new ValueEqualLockableEntry("equal"), LinkedList::new, 1);
+
+        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, pool::getAndLock);
+        assertThat(ex.getMessage(), containsString("must use Object identity equality and hash codes"));
+    }
+
+    public void testCloseAndCheckoutAllIncludesInFlightCreationAndPreventsFurtherAdmission() throws Exception {
+        CountDownLatch supplierEntered = new CountDownLatch(1);
+        CountDownLatch allowCreation = new CountDownLatch(1);
+        CountDownLatch itemAcquired = new CountDownLatch(1);
+        CountDownLatch releaseItem = new CountDownLatch(1);
+        AtomicReference<LockableEntry> acquired = new AtomicReference<>();
+        AtomicReference<List<LockableEntry>> checkedOut = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        LockablePool<LockableEntry> pool = new LockablePool<>(() -> {
+            supplierEntered.countDown();
+            await(allowCreation);
+            return new LockableEntry("in-flight");
+        }, LinkedList::new, 1);
+
+        Thread getter = new Thread(() -> {
+            try {
+                LockableEntry item = pool.getAndLock();
+                acquired.set(item);
+                itemAcquired.countDown();
+                await(releaseItem);
+                item.unlock();
+            } catch (Throwable t) {
+                failure.compareAndSet(null, t);
+            }
+        }, "pool-getter");
+        Thread closer = new Thread(() -> {
+            try {
+                checkedOut.set(pool.closeAndCheckoutAll());
+            } catch (Throwable t) {
+                failure.compareAndSet(null, t);
+            }
+        }, "pool-closer");
+
+        try {
+            getter.start();
+            assertTrue("supplier must begin creating an item", supplierEntered.await(30, TimeUnit.SECONDS));
+            closer.start();
+            allowCreation.countDown();
+            assertTrue("getter must receive the in-flight item", itemAcquired.await(30, TimeUnit.SECONDS));
+            assertTrue("close must wait for the checked-out item", closer.isAlive());
+            releaseItem.countDown();
+            getter.join(TimeUnit.SECONDS.toMillis(30));
+            closer.join(TimeUnit.SECONDS.toMillis(30));
+
+            assertFalse("getter must finish", getter.isAlive());
+            assertFalse("closer must finish", closer.isAlive());
+            assertNull(failure.get());
+            assertEquals(List.of(acquired.get()), checkedOut.get());
+            assertFalse(pool.isRegistered(acquired.get()));
+            IllegalStateException ex = expectThrows(IllegalStateException.class, pool::getAndLock);
+            assertEquals("LockablePool is already closed", ex.getMessage());
+        } finally {
+            allowCreation.countDown();
+            releaseItem.countDown();
+            getter.join(TimeUnit.SECONDS.toMillis(30));
+            closer.join(TimeUnit.SECONDS.toMillis(30));
+        }
     }
 
     // --- Tests for filtered getAndLock with rejection ---
@@ -262,5 +349,16 @@ public class LockablePoolTests extends OpenSearchTestCase {
         assertTrue(second.isHeldByCurrentThread());
         assertFalse(first.isHeldByCurrentThread());
         releasable.close();
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            if (latch.await(30, TimeUnit.SECONDS) == false) {
+                throw new AssertionError("timed out waiting for test latch");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
     }
 }

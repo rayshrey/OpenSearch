@@ -188,14 +188,12 @@ public class DataFormatAwareEngine implements Indexer {
 
     /**
      * Returns this engine's reservation for the current write thread. Engine failure can close without the write lock,
-     * so close may race the first lookup: the second closed check removes an entry inserted after close cleared the map.
-     * An unregistered reservation returned during that race is local to the operation and cannot outlive it in the map.
+     * so close may race the first lookup: the second open check removes an entry inserted after close cleared the map
+     * and rejects the operation before it can acquire a writer.
      */
     private ReservedWriter reservationForCurrentThread() {
+        ensureOpen();
         final Thread thread = Thread.currentThread();
-        if (isClosed.get()) {
-            return new ReservedWriter();
-        }
         ReservedWriter reserved = reservedWriters.get(thread);
         if (reserved == null) {
             final ReservedWriter created = new ReservedWriter();
@@ -204,6 +202,7 @@ public class DataFormatAwareEngine implements Indexer {
         }
         if (isClosed.get()) {
             reservedWriters.remove(thread, reserved);
+            ensureOpen();
         }
         return reserved;
     }
@@ -211,6 +210,12 @@ public class DataFormatAwareEngine implements Indexer {
     /** Visible for lifecycle tests. */
     int writerReservationCount() {
         return reservedWriters.size();
+    }
+
+    /** Visible for reservation-budget tests on the current write thread. */
+    int reservedWriterAppendCount() {
+        final ReservedWriter reserved = reservedWriters.get(Thread.currentThread());
+        return reserved == null ? 0 : reserved.docs;
     }
 
     /**
@@ -256,12 +261,14 @@ public class DataFormatAwareEngine implements Indexer {
     }
 
     /** Unlocks a registered writer this thread just used and keeps it reserved (out of the pool's available queue). */
-    private static void reserve(ReservedWriter reserved, DefaultLockableHolder<Writer<?>> holder) {
+    private static void reserve(ReservedWriter reserved, DefaultLockableHolder<Writer<?>> holder, boolean documentAppended) {
         if (reserved.holder != holder) {
             reserved.holder = holder;
             reserved.docs = 0;
         }
-        reserved.docs++;
+        if (documentAppended) {
+            reserved.docs++;
+        }
         holder.unlock();
     }
 
@@ -829,6 +836,7 @@ public class DataFormatAwareEngine implements Indexer {
         DefaultLockableHolder<Writer<?>> lockedWriter = null;
         boolean writerCheckedOut = false;
         boolean engineFailedHere = false;
+        boolean documentAppended = false;
         long mappingVersion = currentMappingVersion();
         final ReservedWriter reserved = reservationForCurrentThread();
         lockedWriter = lockReservedWriter(reserved, true, mappingVersion);
@@ -860,6 +868,7 @@ public class DataFormatAwareEngine implements Indexer {
             WriteResult result = currentWriter.addDoc(index.parsedDoc().getDocumentInput());
 
             if (result instanceof WriteResult.Success) {
+                documentAppended = true;
                 indexResult = new Engine.IndexResult(plan.version, index.primaryTerm(), index.seqNo(), plan.currentNotFoundOrDeleted);
                 assert indexResult.getSeqNo() == index.seqNo() : "IndexResult seq no ["
                     + indexResult.getSeqNo()
@@ -924,7 +933,7 @@ public class DataFormatAwareEngine implements Indexer {
                             reserved.holder = null;
                         }
                     } else {
-                        reserve(reserved, lockedWriter);
+                        reserve(reserved, lockedWriter, documentAppended);
                     }
                 }
             }
@@ -1214,7 +1223,7 @@ public class DataFormatAwareEngine implements Indexer {
             return new Engine.DeleteResult(f.cause(), plan.version, delete.primaryTerm(), delete.seqNo(), false);
         } finally {
             if (writerPool.isRegistered(lockedWriter)) {
-                reserve(reserved, lockedWriter);
+                reserve(reserved, lockedWriter, false);
             } else {
                 lockedWriter.unlock();
             }
@@ -2691,8 +2700,9 @@ public class DataFormatAwareEngine implements Indexer {
                 while ((queuedWriter = flushQueue.poll()) != null) {
                     IOUtils.closeWhileHandlingException(queuedWriter);
                 }
-                // Close all writers still in the pool (unflushed writers from the current cycle)
-                for (var holder : writerPool.checkoutAll()) {
+                // Atomically stop writer admission, then close every writer registered before shutdown. An in-flight
+                // creator is included in the snapshot; a later creator observes the closed pool and fails.
+                for (var holder : writerPool.closeAndCheckoutAll()) {
                     IOUtils.closeWhileHandlingException(holder.get());
                 }
                 IOUtils.close(deleteExecutionEngine, indexingExecutionEngine, committer, translogManager);
