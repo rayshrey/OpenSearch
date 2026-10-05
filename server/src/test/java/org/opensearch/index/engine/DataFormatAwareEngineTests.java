@@ -41,6 +41,7 @@ import org.opensearch.index.engine.dataformat.RefreshResult;
 import org.opensearch.index.engine.dataformat.RowIdAwareWriter;
 import org.opensearch.index.engine.dataformat.WriteResult;
 import org.opensearch.index.engine.dataformat.Writer;
+import org.opensearch.index.engine.dataformat.WriterConfig;
 import org.opensearch.index.engine.dataformat.WriterState;
 import org.opensearch.index.engine.dataformat.stub.InMemoryCommitter;
 import org.opensearch.index.engine.dataformat.stub.MockDataFormat;
@@ -5991,6 +5992,104 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
             Engine.IndexResult indexedAfter = engine.index(indexOp(createParsedDocWithInput("2", null)));
             assertThat(indexedAfter.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
             engine.refresh("after-rejected-delete");
+        }
+    }
+
+    public void testReservationBudgetCountsOnlySuccessfulAppends() throws Exception {
+        try (DataFormatAwareEngine engine = createDFAEngine(store, createTempDir())) {
+            Engine.IndexResult first = engine.index(indexOp(createParsedDocWithInput("1", null)));
+            assertThat(first.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+            assertEquals(1, engine.reservedWriterAppendCount());
+
+            for (int i = 0; i < DataFormatAwareEngine.WRITER_RESERVATION_MAX_DOCS + 1; i++) {
+                Engine.DeleteResult deleted = engine.delete(deleteOp("missing-" + i));
+                assertThat(deleted.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+            }
+            assertEquals("deletes must not consume the successful-append budget", 1, engine.reservedWriterAppendCount());
+
+            Engine.IndexResult second = engine.index(indexOp(createParsedDocWithInput("2", null)));
+            assertThat(second.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+            assertEquals(2, engine.reservedWriterAppendCount());
+        }
+    }
+
+    public void testFailedAppendDoesNotConsumeReservationBudget() throws Exception {
+        MockIndexingExecutionEngine indexingEngine = new MockIndexingExecutionEngine(mockDataFormat);
+        indexingEngine.setWriterCustomizer(writer -> {
+            writer.setFailureKeepsActive(true);
+            writer.setWriteResultSupplier(() -> new WriteResult.Failure(new IOException("simulated append rejection"), -1L, -1L, -1L));
+        });
+        MockDataFormatPlugin plugin = MockDataFormatPlugin.of(mockDataFormat).withIndexingEngine(settings -> indexingEngine);
+        try (DataFormatAwareEngine engine = new DataFormatAwareEngine(buildFailingEngineConfig(plugin))) {
+            Engine.IndexResult result = engine.index(indexOp(createParsedDocWithInput("1", null)));
+            assertThat(result.getResultType(), equalTo(Engine.Result.Type.FAILURE));
+            assertEquals("a rejected append must not consume the successful-append budget", 0, engine.reservedWriterAppendCount());
+        }
+    }
+
+    public void testFailureCloseDrainsWriterCreationAlreadyInFlight() throws Exception {
+        CountDownLatch writerCreationStarted = new CountDownLatch(1);
+        CountDownLatch allowWriterCreation = new CountDownLatch(1);
+        AtomicInteger writersCreated = new AtomicInteger();
+        MockIndexingExecutionEngine indexingEngine = new MockIndexingExecutionEngine(mockDataFormat) {
+            @Override
+            public Writer<MockDocumentInput> createWriter(WriterConfig config) {
+                writerCreationStarted.countDown();
+                try {
+                    if (allowWriterCreation.await(30, TimeUnit.SECONDS) == false) {
+                        throw new AssertionError("timed out waiting to finish writer creation");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+                writersCreated.incrementAndGet();
+                return super.createWriter(config);
+            }
+        };
+        MockDataFormatPlugin plugin = MockDataFormatPlugin.of(mockDataFormat).withIndexingEngine(settings -> indexingEngine);
+        DataFormatAwareEngine engine = new DataFormatAwareEngine(buildFailingEngineConfig(plugin));
+        AtomicReference<Throwable> indexingFailure = new AtomicReference<>();
+        AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+        Thread indexer = new Thread(() -> {
+            try {
+                engine.index(indexOp(createParsedDocWithInput("1", null)));
+            } catch (Throwable t) {
+                indexingFailure.set(t);
+            }
+        }, "in-flight-writer-creator");
+        Thread failureCloser = new Thread(() -> {
+            try {
+                engine.failEngine("simulated concurrent failure", new IOException("simulated"));
+            } catch (Throwable t) {
+                closeFailure.set(t);
+            }
+        }, "failure-closer");
+
+        try {
+            indexer.start();
+            assertTrue("writer creation must start", writerCreationStarted.await(30, TimeUnit.SECONDS));
+            failureCloser.start();
+            assertBusy(() -> expectThrows(AlreadyClosedException.class, engine::ensureOpen));
+            allowWriterCreation.countDown();
+            indexer.join(TimeUnit.SECONDS.toMillis(30));
+            failureCloser.join(TimeUnit.SECONDS.toMillis(30));
+
+            assertFalse("indexer must finish", indexer.isAlive());
+            assertFalse("failure close must finish", failureCloser.isAlive());
+            assertNull(closeFailure.get());
+            assertEquals("the in-flight writer must be created exactly once and then drained", 1, writersCreated.get());
+            assertEquals("failure close must clear every reservation", 0, engine.writerReservationCount());
+            expectThrows(AlreadyClosedException.class, () -> engine.index(indexOp(createParsedDocWithInput("2", null))));
+            assertEquals("closed writer admission must reject further creation", 1, writersCreated.get());
+            if (indexingFailure.get() != null) {
+                assertThat(indexingFailure.get(), instanceOf(AlreadyClosedException.class));
+            }
+        } finally {
+            allowWriterCreation.countDown();
+            indexer.join(TimeUnit.SECONDS.toMillis(30));
+            failureCloser.join(TimeUnit.SECONDS.toMillis(30));
+            engine.close();
         }
     }
 
