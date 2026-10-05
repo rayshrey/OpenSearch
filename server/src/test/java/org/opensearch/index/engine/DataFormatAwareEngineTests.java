@@ -5653,33 +5653,53 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
     }
 
     /**
-     * A write thread reserves its writer between index operations but leaves it unlocked, so an engine close from
-     * another thread must complete while the indexing thread is idle, and the next op on that thread must fail cleanly
-     * rather than touch the closed writer.
+     * Reservations belong to the engine, not to long-lived write threads. Closing the engine from another thread must
+     * clear the reservation registry while the owner thread remains alive, and that thread's next operation must fail
+     * cleanly rather than touch the closed writer.
      */
-    public void testReservedWriterDoesNotBlockCloseAndIsForgottenAfterIt() throws Exception {
+    public void testCloseClearsReservationOwnedByLiveThread() throws Exception {
         final DataFormatAwareEngine engine = createDFAEngine(store, createTempDir());
+        final CountDownLatch indexed = new CountDownLatch(1);
+        final CountDownLatch continueAfterClose = new CountDownLatch(1);
+        final AtomicReference<Exception> indexingFailure = new AtomicReference<>();
+        final AtomicReference<Exception> postCloseFailure = new AtomicReference<>();
+        final Thread worker = new Thread(() -> {
+            try {
+                engine.index(indexOp(createParsedDocWithInput("1", null)));
+                engine.index(indexOp(createParsedDocWithInput("2", null)));
+            } catch (Exception e) {
+                indexingFailure.set(e);
+            } finally {
+                indexed.countDown();
+            }
+            try {
+                continueAfterClose.await();
+                engine.index(indexOp(createParsedDocWithInput("3", null)));
+            } catch (Exception e) {
+                postCloseFailure.set(e);
+            }
+        }, "reservation-owner");
+
         boolean closed = false;
         try {
-            engine.index(indexOp(createParsedDocWithInput("1", null)));
-            engine.index(indexOp(createParsedDocWithInput("2", null)));
+            worker.start();
+            assertTrue("worker must finish its initial writes", indexed.await(30, TimeUnit.SECONDS));
+            assertNull("initial writes must succeed", indexingFailure.get());
+            assertEquals("the live worker must own one reservation", 1, engine.writerReservationCount());
 
-            final AtomicReference<Exception> failure = new AtomicReference<>();
-            final Thread closer = new Thread(() -> {
-                try {
-                    engine.close();
-                } catch (Exception e) {
-                    failure.set(e);
-                }
-            }, "engine-closer");
-            closer.start();
-            closer.join(TimeUnit.SECONDS.toMillis(30));
+            engine.close();
             closed = true;
-            assertFalse("close must not wait on an idle thread's reserved writer", closer.isAlive());
-            assertNull("close must not fail", failure.get());
+            assertEquals("close must clear reservations owned by other live threads", 0, engine.writerReservationCount());
+            assertTrue("reservation owner must still be alive after engine close", worker.isAlive());
 
-            expectThrows(AlreadyClosedException.class, () -> engine.index(indexOp(createParsedDocWithInput("3", null))));
+            continueAfterClose.countDown();
+            worker.join(TimeUnit.SECONDS.toMillis(30));
+            assertFalse("worker must finish after close", worker.isAlive());
+            assertThat(postCloseFailure.get(), instanceOf(AlreadyClosedException.class));
+            assertEquals("a post-close operation must not recreate a reservation", 0, engine.writerReservationCount());
         } finally {
+            continueAfterClose.countDown();
+            worker.join(TimeUnit.SECONDS.toMillis(30));
             if (closed == false) {
                 engine.close();
             }
