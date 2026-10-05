@@ -166,20 +166,17 @@ public class DataFormatAwareEngine implements Indexer {
     private final LockablePool<DefaultLockableHolder<Writer<?>>> writerPool;
 
     /**
-     * Upper bound on documents appended through one reserved writer before it is returned to the pool's available
-     * queue and a fresh one is polled, so writers keep rotating at the same cadence as before.
+     * Upper bound on successful appends through one reserved writer before it is returned to the pool's available
+     * queue. This bounds thread-to-writer affinity and periodically gives other write threads a chance to reuse it;
+     * polling after the hand-back may still select the same compatible writer.
      */
     static final int WRITER_RESERVATION_MAX_DOCS = 256;
 
     /**
-     * The writer a write thread used for its last index operation on this engine. It is polled from the pool once and
-     * then kept out of the pool's available queue -- but UNLOCKED -- between operations, so no other write thread can
-     * take it while a refresh or close ({@code writerPool.checkoutAll()}) still can, exactly as before. Each operation
-     * re-locks it with an uncontended {@code tryLock} and verifies it is still the pool's ACTIVE writer: a writer the
-     * refresh checked out is closed (no longer ACTIVE and no longer registered) and is simply forgotten. This replaces
-     * a {@code getAndLock}/{@code releaseAndUnlock} pair through the pool's striped queue per document, plus the
-     * pool-monitor {@code isRegistered} lookup, with one CAS per document. Needs no bulk boundary: an idle thread's
-     * reservation is harmless, since the writer stays registered and is flushed by the next refresh like any other.
+     * A writer reserved by one write thread. It remains registered with the pool but stays out of the available queue
+     * and UNLOCKED between operations, so a refresh or close can still take it through {@code writerPool.checkoutAll()}.
+     * Only the owning thread reads or mutates a reservation; the concurrent map provides lifecycle ownership to this
+     * engine and is cleared on close, avoiding per-engine values in long-lived worker threads' ThreadLocal maps.
      */
     private static final class ReservedWriter {
         @Nullable
@@ -187,7 +184,34 @@ public class DataFormatAwareEngine implements Indexer {
         private int docs;
     }
 
-    private final ThreadLocal<ReservedWriter> reservedWriter = ThreadLocal.withInitial(ReservedWriter::new);
+    private final ConcurrentHashMap<Thread, ReservedWriter> reservedWriters = new ConcurrentHashMap<>();
+
+    /**
+     * Returns this engine's reservation for the current write thread. Engine failure can close without the write lock,
+     * so close may race the first lookup: the second closed check removes an entry inserted after close cleared the map.
+     * An unregistered reservation returned during that race is local to the operation and cannot outlive it in the map.
+     */
+    private ReservedWriter reservationForCurrentThread() {
+        final Thread thread = Thread.currentThread();
+        if (isClosed.get()) {
+            return new ReservedWriter();
+        }
+        ReservedWriter reserved = reservedWriters.get(thread);
+        if (reserved == null) {
+            final ReservedWriter created = new ReservedWriter();
+            final ReservedWriter existing = reservedWriters.putIfAbsent(thread, created);
+            reserved = existing == null ? created : existing;
+        }
+        if (isClosed.get()) {
+            reservedWriters.remove(thread, reserved);
+        }
+        return reserved;
+    }
+
+    /** Visible for lifecycle tests. */
+    int writerReservationCount() {
+        return reservedWriters.size();
+    }
 
     /**
      * Locks this thread's reserved writer for one operation if it is still usable, else drops the reservation.
@@ -806,7 +830,7 @@ public class DataFormatAwareEngine implements Indexer {
         boolean writerCheckedOut = false;
         boolean engineFailedHere = false;
         long mappingVersion = currentMappingVersion();
-        final ReservedWriter reserved = reservedWriter.get();
+        final ReservedWriter reserved = reservationForCurrentThread();
         lockedWriter = lockReservedWriter(reserved, true, mappingVersion);
         try {
             if (lockedWriter == null) {
@@ -1192,7 +1216,7 @@ public class DataFormatAwareEngine implements Indexer {
     private Engine.DeleteResult deleteInEngine(Engine.Delete delete, DeletionStrategy plan) throws IOException {
         // Deletes need only an active writer for generation context; they do not apply mappings. Prefer the writer this
         // thread has reserved, so a delete never makes the pool create an extra (empty) writer beside it.
-        final ReservedWriter reserved = reservedWriter.get();
+        final ReservedWriter reserved = reservationForCurrentThread();
         DefaultLockableHolder<Writer<?>> lockedWriter = lockReservedWriter(reserved, false, 0L);
         if (lockedWriter == null) {
             lockedWriter = writerPool.getAndLock(h -> h.get().state() == WriterState.ACTIVE);
@@ -2702,6 +2726,10 @@ public class DataFormatAwareEngine implements Indexer {
             } catch (Exception e) {
                 logger.warn("failed to close engine resources", e);
             } finally {
+                // isClosed was set before shutdown began, so reservationForCurrentThread cannot leave a raced entry
+                // behind after this clear. Do not mutate ReservedWriter cells here: an engine-failure close may run
+                // concurrently with their owning write threads.
+                reservedWriters.clear();
                 try {
                     store.decRef();
                     logger.debug("engine closed [{}]", reason);
