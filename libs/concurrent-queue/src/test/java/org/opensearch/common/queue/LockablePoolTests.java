@@ -16,10 +16,9 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
-
-import static org.hamcrest.Matchers.containsString;
 
 /**
  * Tests for {@link LockablePool}.
@@ -166,11 +165,27 @@ public class LockablePoolTests extends OpenSearchTestCase {
         assertEquals("LockablePool is already closed", ex.getMessage());
     }
 
-    public void testRejectsLockableWithValueEquality() {
-        LockablePool<ValueEqualLockableEntry> pool = new LockablePool<>(() -> new ValueEqualLockableEntry("equal"), LinkedList::new, 1);
+    public void testDistinctValueEqualLockablesRemainSeparatelyRegistered() {
+        AtomicInteger supplied = new AtomicInteger();
+        LockablePool<ValueEqualLockableEntry> pool = new LockablePool<>(() -> {
+            supplied.incrementAndGet();
+            return new ValueEqualLockableEntry("equal");
+        }, LinkedList::new, 1);
 
-        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, pool::getAndLock);
-        assertThat(ex.getMessage(), containsString("must use Object identity equality and hash codes"));
+        ValueEqualLockableEntry first = pool.getAndLock();
+        pool.releaseAndUnlock(first);
+        ValueEqualLockableEntry second = pool.getAndLock(candidate -> candidate != first);
+        assertNotSame(first, second);
+        assertEquals(first, second);
+        assertEquals(2, supplied.get());
+        assertTrue(pool.isRegistered(first));
+        assertTrue(pool.isRegistered(second));
+        pool.releaseAndUnlock(second);
+
+        List<ValueEqualLockableEntry> checkedOut = pool.checkoutAll();
+        assertEquals(2, checkedOut.size());
+        assertTrue(checkedOut.stream().anyMatch(item -> item == first));
+        assertTrue(checkedOut.stream().anyMatch(item -> item == second));
     }
 
     public void testCloseAndCheckoutAllIncludesInFlightCreationAndPreventsFurtherAdmission() throws Exception {
