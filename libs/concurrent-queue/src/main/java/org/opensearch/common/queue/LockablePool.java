@@ -18,8 +18,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Queue;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -36,12 +34,11 @@ import java.util.function.Supplier;
  *       but remain tracked by the pool and included in {@link #checkoutAll()}.</li>
  * </ul>
  *
- * @param <T> the pooled item type, must implement {@link Lockable} and retain {@link Object}'s identity-based
- *            {@code equals} and {@code hashCode} implementations
+ * @param <T> the pooled item type, must implement {@link Lockable}
  */
 public final class LockablePool<T extends Lockable> implements Iterable<T>, Closeable {
 
-    private final Set<T> items;
+    private final ConcurrentIdentitySet<T> items = new ConcurrentIdentitySet<>();
     private final LockableConcurrentQueue<T> availableItems;
     private final Supplier<T> itemSupplier;
     private volatile boolean closed;
@@ -54,9 +51,6 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      * @param concurrency   the concurrency level (number of stripes)
      */
     public LockablePool(Supplier<T> itemSupplier, Supplier<Queue<T>> queueSupplier, int concurrency) {
-        // Lockables are validated once at creation to retain Object identity equality. The concurrent set then gives
-        // isRegistered a lock-free, allocation-free read; mutations stay under the pool monitor.
-        this.items = Collections.newSetFromMap(new ConcurrentHashMap<>());
         this.itemSupplier = Objects.requireNonNull(itemSupplier, "itemSupplier must not be null");
         this.availableItems = new LockableConcurrentQueue<>(queueSupplier, concurrency);
     }
@@ -118,24 +112,9 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
     private synchronized T fetchItem() {
         ensureOpen();
         T item = Objects.requireNonNull(itemSupplier.get(), "itemSupplier must not return null");
-        ensureIdentityEquality(item);
         item.lock();
         items.add(item);
         return item;
-    }
-
-    private static void ensureIdentityEquality(Object item) {
-        try {
-            final Class<?> type = item.getClass();
-            if (type.getMethod("equals", Object.class).getDeclaringClass() != Object.class
-                || type.getMethod("hashCode").getDeclaringClass() != Object.class) {
-                throw new IllegalArgumentException(
-                    "Pooled Lockable type [" + type.getName() + "] must use Object identity equality and hash codes"
-                );
-            }
-        } catch (NoSuchMethodException e) {
-            throw new AssertionError("Object equality methods must be available", e);
-        }
     }
 
     /**
@@ -178,7 +157,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
         final List<T> snapshot;
         synchronized (this) {
             ensureOpen();
-            snapshot = List.copyOf(items);
+            snapshot = items.snapshot();
         }
         return checkoutAll(snapshot, onCheckout);
     }
@@ -196,7 +175,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
         synchronized (this) {
             ensureOpen();
             closed = true;
-            snapshot = List.copyOf(items);
+            snapshot = items.snapshot();
         }
         return checkoutAll(snapshot, t -> {});
     }
@@ -251,6 +230,95 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
         return item::unlock;
     }
 
+    /**
+     * Identity-keyed registry with lock-free, allocation-free reads. The enclosing pool serializes mutations, which
+     * rebuild and publish an immutable open-addressed table. Readers probe one volatile table snapshot using
+     * {@link System#identityHashCode(Object)} and {@code ==}.
+     */
+    private static final class ConcurrentIdentitySet<E> {
+        private static final int INITIAL_CAPACITY = 4;
+
+        private volatile Object[] table = new Object[INITIAL_CAPACITY];
+        private int size;
+
+        void add(E item) {
+            final Object[] current = table;
+            if (contains(current, item)) {
+                return;
+            }
+            final boolean grow = (size + 1) * 2 > current.length;
+            final Object[] updated = grow ? new Object[current.length * 2] : current.clone();
+            if (grow) {
+                for (Object existing : current) {
+                    if (existing != null) {
+                        insert(updated, existing);
+                    }
+                }
+            }
+            insert(updated, item);
+            size++;
+            table = updated;
+        }
+
+        boolean remove(E item) {
+            final Object[] current = table;
+            if (contains(current, item) == false) {
+                return false;
+            }
+            final Object[] updated = new Object[current.length];
+            for (Object existing : current) {
+                if (existing != null && existing != item) {
+                    insert(updated, existing);
+                }
+            }
+            size--;
+            table = updated;
+            return true;
+        }
+
+        boolean contains(E item) {
+            return contains(table, item);
+        }
+
+        @SuppressWarnings("unchecked")
+        List<E> snapshot() {
+            final Object[] current = table;
+            final List<E> snapshot = new ArrayList<>(size);
+            for (Object item : current) {
+                if (item != null) {
+                    snapshot.add((E) item);
+                }
+            }
+            return List.copyOf(snapshot);
+        }
+
+        private static boolean contains(Object[] current, Object item) {
+            final int mask = current.length - 1;
+            int slot = spread(System.identityHashCode(item)) & mask;
+            Object existing;
+            while ((existing = current[slot]) != null) {
+                if (existing == item) {
+                    return true;
+                }
+                slot = (slot + 1) & mask;
+            }
+            return false;
+        }
+
+        private static void insert(Object[] target, Object item) {
+            final int mask = target.length - 1;
+            int slot = spread(System.identityHashCode(item)) & mask;
+            while (target[slot] != null) {
+                slot = (slot + 1) & mask;
+            }
+            target[slot] = item;
+        }
+
+        private static int spread(int hash) {
+            return hash ^ (hash >>> 16);
+        }
+    }
+
     private void ensureOpen() {
         if (closed) {
             throw new IllegalStateException("LockablePool is already closed");
@@ -259,7 +327,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
 
     @Override
     public synchronized Iterator<T> iterator() {
-        return List.copyOf(items).iterator();
+        return items.snapshot().iterator();
     }
 
     @Override
