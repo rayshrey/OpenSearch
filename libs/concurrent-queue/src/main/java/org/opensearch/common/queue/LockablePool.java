@@ -18,6 +18,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -38,7 +40,9 @@ import java.util.function.Supplier;
  */
 public final class LockablePool<T extends Lockable> implements Iterable<T>, Closeable {
 
-    private final ConcurrentIdentitySet<T> items = new ConcurrentIdentitySet<>();
+    // Identity-keyed (see IdentityKey) and concurrent so isRegistered is a lock-free read; mutations stay under the
+    // pool monitor. This is the same shape Apache Commons Pool uses for its allObjects registry.
+    private final Set<IdentityKey<T>> items = ConcurrentHashMap.newKeySet();
     private final LockableConcurrentQueue<T> availableItems;
     private final Supplier<T> itemSupplier;
     private volatile boolean closed;
@@ -113,7 +117,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
         ensureOpen();
         T item = Objects.requireNonNull(itemSupplier.get(), "itemSupplier must not return null");
         item.lock();
-        items.add(item);
+        items.add(new IdentityKey<>(item));
         return item;
     }
 
@@ -157,7 +161,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
         final List<T> snapshot;
         synchronized (this) {
             ensureOpen();
-            snapshot = items.snapshot();
+            snapshot = snapshot();
         }
         return checkoutAll(snapshot, onCheckout);
     }
@@ -175,7 +179,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
         synchronized (this) {
             ensureOpen();
             closed = true;
-            snapshot = items.snapshot();
+            snapshot = snapshot();
         }
         return checkoutAll(snapshot, t -> {});
     }
@@ -190,7 +194,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
         synchronized (this) {
             for (T item : lockedItems) {
                 try {
-                    if (isRegistered(item) && items.remove(item)) {
+                    if (isRegistered(item) && items.remove(new IdentityKey<>(item))) {
                         availableItems.remove(item);
                         onCheckout.accept(item);
                         checkedOutItems.add(item);
@@ -210,7 +214,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      * @return true if the item is part of this pool
      */
     public boolean isRegistered(T item) {
-        return items.contains(item);
+        return items.contains(new IdentityKey<>(item));
     }
 
     /**
@@ -223,99 +227,43 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
      * @throws IllegalArgumentException if the item is not registered in this pool
      */
     public synchronized Releasable checkout(T item) {
-        if (items.remove(item) == false) {
+        if (items.remove(new IdentityKey<>(item)) == false) {
             throw new IllegalArgumentException("Item is not registered in this pool");
         }
         availableItems.remove(item);
         return item::unlock;
     }
 
+    /** Copies the registered items; callers hold the pool monitor so the copy is consistent. */
+    private List<T> snapshot() {
+        final List<T> snapshot = new ArrayList<>(items.size());
+        for (IdentityKey<T> key : items) {
+            snapshot.add(key.ref);
+        }
+        return List.copyOf(snapshot);
+    }
+
     /**
-     * Identity-keyed registry with lock-free, allocation-free reads. The enclosing pool serializes mutations, which
-     * rebuild and publish an immutable open-addressed table. Readers probe one volatile table snapshot using
-     * {@link System#identityHashCode(Object)} and {@code ==}.
+     * Wraps a pooled item so the registry compares by reference ({@code ==} and
+     * {@link System#identityHashCode(Object)}) regardless of how the item defines {@code equals}, preserving the
+     * identity semantics of the {@code IdentityHashMap} this registry replaced. Lookups allocate one short-lived
+     * key, which is the same trade Apache Commons Pool makes for its object registry.
      */
-    private static final class ConcurrentIdentitySet<E> {
-        private static final int INITIAL_CAPACITY = 4;
+    private static final class IdentityKey<E> {
+        private final E ref;
 
-        private volatile Object[] table = new Object[INITIAL_CAPACITY];
-        private int size;
-
-        void add(E item) {
-            final Object[] current = table;
-            if (contains(current, item)) {
-                return;
-            }
-            final boolean grow = (size + 1) * 2 > current.length;
-            final Object[] updated = grow ? new Object[current.length * 2] : current.clone();
-            if (grow) {
-                for (Object existing : current) {
-                    if (existing != null) {
-                        insert(updated, existing);
-                    }
-                }
-            }
-            insert(updated, item);
-            size++;
-            table = updated;
+        IdentityKey(E ref) {
+            this.ref = Objects.requireNonNull(ref, "pooled item must not be null");
         }
 
-        boolean remove(E item) {
-            final Object[] current = table;
-            if (contains(current, item) == false) {
-                return false;
-            }
-            final Object[] updated = new Object[current.length];
-            for (Object existing : current) {
-                if (existing != null && existing != item) {
-                    insert(updated, existing);
-                }
-            }
-            size--;
-            table = updated;
-            return true;
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof IdentityKey<?> key && key.ref == ref;
         }
 
-        boolean contains(E item) {
-            return contains(table, item);
-        }
-
-        @SuppressWarnings("unchecked")
-        List<E> snapshot() {
-            final Object[] current = table;
-            final List<E> snapshot = new ArrayList<>(size);
-            for (Object item : current) {
-                if (item != null) {
-                    snapshot.add((E) item);
-                }
-            }
-            return List.copyOf(snapshot);
-        }
-
-        private static boolean contains(Object[] current, Object item) {
-            final int mask = current.length - 1;
-            int slot = spread(System.identityHashCode(item)) & mask;
-            Object existing;
-            while ((existing = current[slot]) != null) {
-                if (existing == item) {
-                    return true;
-                }
-                slot = (slot + 1) & mask;
-            }
-            return false;
-        }
-
-        private static void insert(Object[] target, Object item) {
-            final int mask = target.length - 1;
-            int slot = spread(System.identityHashCode(item)) & mask;
-            while (target[slot] != null) {
-                slot = (slot + 1) & mask;
-            }
-            target[slot] = item;
-        }
-
-        private static int spread(int hash) {
-            return hash ^ (hash >>> 16);
+        @Override
+        public int hashCode() {
+            return System.identityHashCode(ref);
         }
     }
 
@@ -327,7 +275,7 @@ public final class LockablePool<T extends Lockable> implements Iterable<T>, Clos
 
     @Override
     public synchronized Iterator<T> iterator() {
-        return items.snapshot().iterator();
+        return snapshot().iterator();
     }
 
     @Override
