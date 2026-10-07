@@ -209,6 +209,17 @@ public interface Indexer
     Engine.GetResult getById(Engine.Get get, BiFunction<String, Engine.SearcherScope, Engine.Searcher> searcherFactory) throws IOException;
 
     /**
+     * Hints that the given document ids are about to be fetched, so an engine that can read them
+     * together may do so now instead of one at a time. Serves the bulk update path, where every
+     * update's id is known before any of them execute.
+     *
+     * <p>Pure optimization with no observable effect: a prefetched value is only ever used where
+     * the per-document read would have returned the same thing, and any failure must leave the
+     * normal path untouched. Defaults to doing nothing.
+     */
+    default void prefetchUpdateGets(java.util.List<String> ids) {}
+
+    /**
      * Returns {@code true} if there are merges queued but not yet started.
      * <p>
      * Implementations must override explicitly — there is no default to ensure each engine

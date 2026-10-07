@@ -59,6 +59,20 @@ public interface DocumentLookupProvider {
      * Returns metadata for all documents with {@code _seq_no > fromSeqNoExclusive}. Default returns empty list.
      * The {@code resolver} resolves each document's row location.
      */
+    /**
+     * Resolves and reads many documents in as few backend calls as possible. Best-effort: ids that
+     * cannot be served are absent from the result and the caller reads them individually. Defaults
+     * to serving nothing, so a provider need not implement it.
+     */
+    default java.util.Map<String, DocumentLookupResult> prefetchByIds(
+        List<String> ids,
+        IndexReaderProvider.Reader reader,
+        Index index,
+        DocumentMetadataResolver resolver
+    ) throws IOException {
+        return java.util.Map.of();
+    }
+
     default List<DocumentLookupResult> getDocsAboveSeqNo(
         long fromSeqNoExclusive,
         IndexReaderProvider.Reader reader,

@@ -176,6 +176,24 @@ async fn internal_search_dataframe(
         InternalSearch::SeqNoAbove(seq_no_floor) => df
             .filter(col("_seq_no").gt(lit(seq_no_floor)))?
             .select_columns(&["_id", "_seq_no", "_primary_term", "_version"]),
+        // Batched point read. An IN list over `__row_id__` lowers to a disjunction of
+        // equalities, so DataFusion still prunes row groups and pages from the column's
+        // min/max statistics exactly as the single-row case does — but one scan now
+        // serves every requested id, and a page shared by several ids is decompressed
+        // once. No LIMIT: the predicate itself bounds the output to the ids asked for.
+        InternalSearch::ByRowIds(row_ids) => {
+            if row_ids.is_empty() {
+                return Err(DataFusionError::Execution(
+                    "internal search ByRowIds: empty row-id list".to_string(),
+                ));
+            }
+            // TEMP(batch-get): proves the batched native path is reached.
+            log_debug!("BATCH-GET native: one scan for {} row ids", row_ids.len());
+            df.filter(
+                col(crate::ROW_ID_COLUMN_NAME)
+                    .in_list(row_ids.iter().map(|&r| lit(r)).collect::<Vec<_>>(), false),
+            )
+        }
         InternalSearch::Off => unreachable!("internal_search_dataframe called with Off"),
     }
 }

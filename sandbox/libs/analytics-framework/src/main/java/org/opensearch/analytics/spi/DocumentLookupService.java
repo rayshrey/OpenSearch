@@ -27,6 +27,7 @@ import org.opensearch.indices.IndicesModule;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +92,59 @@ public class DocumentLookupService {
         long primaryTerm = extractLong(row, "_primary_term", SequenceNumbers.UNASSIGNED_PRIMARY_TERM);
         long version = extractLong(row, "_version", Versions.NOT_FOUND);
         return new DocumentLookupResult(id, version, true, null, seqNo, primaryTerm, Map.of(), Map.of());
+    }
+
+    /**
+     * Resolves and reads many documents in as few backend calls as possible, for the bulk update
+     * prefetch.
+     *
+     * <p>Each id still costs its own secondary-index seek — that is a term lookup, not a row read.
+     * What this collapses is the row read: ids are grouped by the file they live in and each group
+     * is handed to {@link DocumentRowReader#executeRows} as one call, so N updates spread over F
+     * files cost F reads rather than N.
+     *
+     * <p>Best-effort by contract. An id that cannot be resolved, whose file set has gone, or whose
+     * row the backend did not return is simply absent from the result, and the caller reads it
+     * individually on the normal path. Never throws for a single bad id.
+     *
+     * @return results keyed by document id, possibly smaller than {@code ids}
+     */
+    public Map<String, DocumentLookupResult> prefetchByIds(List<String> ids, IndexReaderProvider.Reader reader, Index index)
+        throws IOException {
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        // Group the resolved locations by file so each file is read exactly once.
+        Map<WriterFileSet, Map<Long, String>> idsByFileSet = new LinkedHashMap<>();
+        for (String id : ids) {
+            DocumentMetadata metadata = documentResolver.resolveMetadata(reader, id);
+            if (metadata == null) {
+                continue;
+            }
+            WriterFileSet fileSet = reader.catalogSnapshot().findFileSet(executor.formatName(), metadata.writerGeneration());
+            if (fileSet == null) {
+                continue;
+            }
+            idsByFileSet.computeIfAbsent(fileSet, f -> new LinkedHashMap<>()).put(metadata.rowId(), id);
+        }
+        if (idsByFileSet.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, DocumentLookupResult> prefetched = new HashMap<>();
+        for (Map.Entry<WriterFileSet, Map<Long, String>> entry : idsByFileSet.entrySet()) {
+            Map<Long, String> idByRowId = entry.getValue();
+            // Sorted so the backend sees ascending row ids — the order a single forward scan wants.
+            long[] rowIds = idByRowId.keySet().stream().mapToLong(Long::longValue).sorted().toArray();
+            Map<Long, Map<String, Object>> rows = executor.executeRows(rowIds, entry.getKey());
+            for (Map.Entry<Long, Map<String, Object>> row : rows.entrySet()) {
+                String id = idByRowId.get(row.getKey());
+                if (id != null) {
+                    prefetched.put(id, buildResultFromRow(id, row.getValue()));
+                }
+            }
+        }
+        return prefetched;
     }
 
     /** Fetches the raw row for an already-resolved document location. */

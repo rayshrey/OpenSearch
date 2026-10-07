@@ -60,6 +60,18 @@ public final class DocumentLookupSupport {
     }
 
     /**
+     * Resolves and reads many documents in as few backend calls as possible. Best-effort: ids the
+     * provider could not serve are absent from the result and must be read individually.
+     */
+    public java.util.Map<String, DocumentLookupResult> prefetchFromReader(java.util.List<String> ids, IndexReaderProvider.Reader reader)
+        throws IOException {
+        if (provider == null || ids.isEmpty() || reader.catalogSnapshot().getSegments().isEmpty()) {
+            return java.util.Map.of();
+        }
+        return provider.prefetchByIds(ids, reader, shardId.getIndex(), resolver);
+    }
+
+    /**
      * Applies read-time version-conflict checks against a resolved {@code result}, mirroring the
      * get semantics in {@code InternalEngine}. A no-op when the document does not exist.
      *

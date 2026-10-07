@@ -384,7 +384,11 @@ pub unsafe extern "C" fn df_execute_query(
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
     let query_config =
         crate::datafusion_query_config::DatafusionQueryConfig::from_ffm_ptr(query_config_ptr);
-    let internal_search = InternalSearch::from_wire(internal_search_mode, internal_search_bound);
+    let internal_search = InternalSearch::from_wire_with_plan(
+        internal_search_mode,
+        internal_search_bound,
+        plan_bytes,
+    );
     // Copy the plan bytes so the spawned future can own them (`cpu_executor.spawn`
     // requires `'static`). The `shard_view_ptr`, `runtime_ptr` are raw pointers
     // held live by the caller for the duration of the FFM downcall — safe to

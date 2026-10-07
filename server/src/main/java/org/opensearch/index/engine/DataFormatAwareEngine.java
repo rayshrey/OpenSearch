@@ -256,6 +256,38 @@ public class DataFormatAwareEngine implements Indexer {
     private volatile CountDownLatch activeFlushLatch;
     private final LiveVersionMap versionMap;
     private final CounterMetric numVersionLookups = new CounterMetric();
+
+    /**
+     * Rows read ahead by {@link #prefetchUpdateGets} for the update legs of an in-flight bulk
+     * request, so N updates spread over F primary-store files cost F batched reads instead of N
+     * single-row reads.
+     *
+     * <p>Correctness rests on two conditions, both required:
+     * <ol>
+     *   <li>the {@link LiveVersionMap} — always consulted first — has no entry for the uid, and</li>
+     *   <li>no refresh has begun since the prefetch ran (generation match).</li>
+     * </ol>
+     * Any write concurrent with the prefetch either still has its versionMap entry, which shadows
+     * this cache, or a refresh has begun since and bumped {@link #prefetchCacheGeneration},
+     * rejecting it — because this cache is cleared at refresh START while versionMap entries
+     * survive until refresh END. That ordering is what also makes repeated updates to the same id
+     * within one bulk request safe: once the earlier item has written, the id is in the versionMap
+     * and the prefetched row can no longer be reached.
+     *
+     * <p>Entries are consumed at most once. A miss is free — the normal per-document read runs.
+     */
+    private final ConcurrentHashMap<BytesRef, PrefetchedDocument> prefetchedUpdateDocs = new ConcurrentHashMap<>();
+    private final AtomicLong prefetchCacheGeneration = new AtomicLong();
+    private final CounterMetric numPrefetchHits = new CounterMetric();
+    private final CounterMetric numPrefetchedDocs = new CounterMetric();
+
+    /** Caps the prefetch cache so a pathological bulk request cannot pin unbounded heap. */
+    static final int PREFETCH_CACHE_MAX_ENTRIES = 10_000;
+
+    /** A read-ahead lookup result plus the cache generation it was read under. */
+    private record PrefetchedDocument(DocumentLookupResult result, long generation) {
+    }
+
     private final CounterMetric numIndexVersionsLookups = new CounterMetric();
 
     /**
@@ -305,6 +337,19 @@ public class DataFormatAwareEngine implements Indexer {
         this.versionMap = new LiveVersionMap();
 
         List<ReferenceManager.RefreshListener> refreshListeners = new ArrayList<>();
+        // Must run BEFORE the versionMap listener: the prefetch cache dies at refresh start,
+        // strictly before versionMap entries are pruned at refresh end. That ordering is what
+        // makes the cache safe — see the invariant on prefetchedUpdateDocs.
+        refreshListeners.add(new ReferenceManager.RefreshListener() {
+            @Override
+            public void beforeRefresh() {
+                prefetchCacheGeneration.incrementAndGet();
+                prefetchedUpdateDocs.clear();
+            }
+
+            @Override
+            public void afterRefresh(boolean didRefresh) {}
+        });
         refreshListeners.add(versionMap);
         if (engineConfig.getInternalRefreshListener() != null) {
             refreshListeners.addAll(engineConfig.getInternalRefreshListener());
@@ -2380,7 +2425,17 @@ public class DataFormatAwareEngine implements Indexer {
                 }
             }
 
-            // Fall through: read from parquet
+            // Fall through: read from parquet. A row read ahead by prefetchUpdateGets for this
+            // same uid can stand in here — the versionMap miss above is one half of the condition
+            // that makes it trustworthy, the generation check inside is the other.
+            DocumentLookupResult prefetched = pollPrefetchedDocument(get.uid().bytes());
+            if (prefetched != null) {
+                numPrefetchHits.inc();
+                // TEMP(batch-get): proves the prefetched row is what served this get.
+                logger.info("BATCH-GET hit: id={} served from prefetch cache (no per-doc parquet read)", get.id());
+                documentLookup.applyReadVersionConflicts(get, prefetched);
+                return prefetched.exists() ? prefetched.toGetResult() : Engine.GetResult.NOT_EXISTS;
+            }
             try (GatedCloseable<Reader> readerRef = acquireReader()) {
                 DocumentLookupResult result = documentLookup.lookupFromReader(get, readerRef.get());
                 return result.exists() ? result.toGetResult() : Engine.GetResult.NOT_EXISTS;
@@ -2415,6 +2470,116 @@ public class DataFormatAwareEngine implements Indexer {
             flush(false, true);
         }
         return catalogSnapshotManager.acquireCommittedSnapshot(false);
+    }
+
+    /**
+     * Reads ahead the primary-store rows for the update legs of a bulk request, so the many
+     * single-row reads that would otherwise happen one per item collapse into one batched read per
+     * file.
+     *
+     * <p>Only ids that would actually reach the primary store are read: an id already in the
+     * {@link LiveVersionMap} is served from there (or the translog) and is skipped here. Surviving
+     * ids are resolved and read in as few backend calls as the backend supports, then parked in
+     * {@link #prefetchedUpdateDocs} for {@link #getById} to consume.
+     *
+     * <p>Pure optimization, and deliberately silent: any failure, including a closed engine or a
+     * backend that cannot batch, leaves every document to be read the normal way. Nothing
+     * observable depends on this having run.
+     */
+    @Override
+    public void prefetchUpdateGets(List<String> ids) {
+        if (ids.isEmpty() || documentLookup.isSupported() == false || prefetchedUpdateDocs.size() >= PREFETCH_CACHE_MAX_ENTRIES) {
+            return;
+        }
+        try (ReleasableLock ignored = readLock.acquire()) {
+            ensureOpen();
+            // Capture the generation BEFORE acquiring the reader so a cached row is provably no
+            // older than the last refresh boundary.
+            final long prefetchGeneration = prefetchCacheGeneration.get();
+            List<String> candidates = new ArrayList<>(ids.size());
+            for (String id : ids) {
+                BytesRef uid = uidForId(id);
+                if (prefetchedUpdateDocs.containsKey(uid)) {
+                    continue;
+                }
+                // Already live in the version map: the realtime path serves it, so reading the
+                // stored row would be wasted work.
+                try (Releasable ignore = versionMap.acquireLock(uid)) {
+                    if (getVersionFromMap(uid) != null) {
+                        continue;
+                    }
+                }
+                candidates.add(id);
+            }
+            if (candidates.isEmpty()) {
+                return;
+            }
+            // TEMP(batch-get): proves the prefetch pre-pass ran and how many ids survived.
+            logger.info("BATCH-GET prefetch: {} of {} update ids need a stored-row read", candidates.size(), ids.size());
+            Map<String, DocumentLookupResult> prefetched;
+            try (GatedCloseable<Reader> readerRef = acquireReader()) {
+                prefetched = documentLookup.prefetchFromReader(candidates, readerRef.get());
+            }
+            for (Map.Entry<String, DocumentLookupResult> entry : prefetched.entrySet()) {
+                cachePrefetchedDocument(uidForId(entry.getKey()), entry.getValue(), prefetchGeneration);
+            }
+            numPrefetchedDocs.inc(prefetched.size());
+            // TEMP(batch-get): proves rows actually landed in the cache.
+            logger.info("BATCH-GET prefetch: cached {} rows", prefetched.size());
+        } catch (Exception e) {
+            // Best-effort: fall back to per-document reads.
+            logger.debug("update prefetch skipped", e);
+        }
+    }
+
+    private static BytesRef uidForId(String id) {
+        return new Term(IdFieldMapper.NAME, Uid.encodeId(id)).bytes();
+    }
+
+    /**
+     * Parks a read-ahead row under the per-uid lock, so a writer that raced the prefetch always
+     * wins: if it has already published a versionMap entry we drop the row rather than cache a
+     * value that entry would have to shadow.
+     */
+    private void cachePrefetchedDocument(BytesRef uid, DocumentLookupResult result, long prefetchGeneration) {
+        if (prefetchedUpdateDocs.size() >= PREFETCH_CACHE_MAX_ENTRIES) {
+            return;
+        }
+        try (Releasable ignored = versionMap.acquireLock(uid)) {
+            if (getVersionFromMap(uid) != null) {
+                return;
+            }
+            if (prefetchCacheGeneration.get() != prefetchGeneration) {
+                return;
+            }
+            prefetchedUpdateDocs.put(BytesRef.deepCopyOf(uid), new PrefetchedDocument(result, prefetchGeneration));
+        }
+    }
+
+    /**
+     * Consumes (at most once) a row parked by {@link #prefetchUpdateGets}. Returns {@code null}
+     * when absent or when a refresh has begun since it was read, in which case the caller performs
+     * the normal read. Callers must already have found no versionMap entry for the uid.
+     */
+    private DocumentLookupResult pollPrefetchedDocument(BytesRef uid) {
+        if (prefetchedUpdateDocs.isEmpty()) {
+            return null;
+        }
+        PrefetchedDocument cached = prefetchedUpdateDocs.remove(uid);
+        if (cached == null) {
+            return null;
+        }
+        return cached.generation() == prefetchCacheGeneration.get() ? cached.result() : null;
+    }
+
+    // visible for tests
+    long prefetchHitCount() {
+        return numPrefetchHits.count();
+    }
+
+    // visible for tests
+    long prefetchedDocCount() {
+        return numPrefetchedDocs.count();
     }
 
     /**

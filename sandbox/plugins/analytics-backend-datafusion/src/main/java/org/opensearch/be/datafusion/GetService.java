@@ -22,6 +22,7 @@ import org.opensearch.be.datafusion.nativelib.ReaderHandle;
 import org.opensearch.be.datafusion.nativelib.StreamHandle;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.exec.DocumentMetadataResolver;
 import org.opensearch.index.engine.exec.MonoFileWriterSet;
 import org.opensearch.index.engine.exec.WriterFileSet;
@@ -33,7 +34,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -147,6 +151,62 @@ public class GetService implements Closeable {
             }
         }
 
+        /**
+         * Batched sibling of {@link #executeSingleRow}: reads many row ids from one parquet file in
+         * a single native call, so the reader open, FFM crossing, stream setup and any parquet page
+         * shared by several ids are paid once instead of per row.
+         *
+         * <p>Results are keyed by {@code __row_id__} read back off each row rather than by request
+         * order, because the native IN-list plan makes no ordering guarantee. A requested id that
+         * the scan did not return is simply absent from the map — the caller falls back to a
+         * per-row read for those.
+         */
+        @Override
+        public Map<Long, Map<String, Object>> executeRows(long[] rowIds, WriterFileSet parquetSet) throws IOException {
+            if (rowIds.length == 0) {
+                return Map.of();
+            }
+            for (long rowId : rowIds) {
+                if (rowId < 0) {
+                    throw new IllegalArgumentException("rowId must be non-negative, got: " + rowId);
+                }
+            }
+            String parquetDir = parquetSet.directory();
+            String parquetFile = parquetSet.files().iterator().next();
+            long runtimePtr = dfPlugin.getDataFusionService().getNativeRuntime().get();
+            MonoFileWriterSet segment = MonoFileWriterSet.of(parquetDir, parquetSet.writerGeneration(), parquetFile, 0L);
+            // TEMP(batch-get): proves the batched native read is reached and how wide the batch is.
+            logger.info("BATCH-GET native read: {} rowIds, generation={}", rowIds.length, parquetSet.writerGeneration());
+            try (ReaderHandle readerHandle = new ReaderHandle(parquetDir, List.of(segment), null, List.of(), List.of())) {
+                long streamPtr = executeInternalSearch(
+                    readerHandle.getPointer(),
+                    runtimePtr,
+                    NativeBridge.INTERNAL_SEARCH_BY_ROW_IDS,
+                    0L,
+                    packRowIds(rowIds),
+                    "DataFusion batched get-by-id query failed"
+                );
+                List<Map<String, Object>> rows = readAllRows(streamPtr);
+                Map<Long, Map<String, Object>> byRowId = new HashMap<>(rows.size());
+                for (Map<String, Object> row : rows) {
+                    Object marker = row.get(DocumentInput.ROW_ID_FIELD);
+                    if (marker instanceof Number number) {
+                        byRowId.put(number.longValue(), row);
+                    }
+                }
+                return byRowId;
+            }
+        }
+
+        /** Packs row ids as the little-endian {@code i64} array the native ByRowIds mode decodes. */
+        private static byte[] packRowIds(long[] rowIds) {
+            ByteBuffer buffer = ByteBuffer.allocate(rowIds.length * Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+            for (long rowId : rowIds) {
+                buffer.putLong(rowId);
+            }
+            return buffer.array();
+        }
+
         @Override
         public List<Map<String, Object>> executeRowsAboveSeqNo(List<WriterFileSet> fileSets, long seqNoFloor) throws IOException {
             if (fileSets.isEmpty()) {
@@ -227,6 +287,11 @@ public class GetService implements Closeable {
          * but a valid {@link WireConfigSnapshot} is still required.
          */
         private long executeInternalSearch(long readerPtr, long runtimePtr, long mode, long bound, String errorMessage) throws IOException {
+            return executeInternalSearch(readerPtr, runtimePtr, mode, bound, EMPTY_PLAN, errorMessage);
+        }
+
+        private long executeInternalSearch(long readerPtr, long runtimePtr, long mode, long bound, byte[] plan, String errorMessage)
+            throws IOException {
             CompletableFuture<Long> future = new CompletableFuture<>();
             WireConfigSnapshot configSnapshot = WireConfigSnapshot.builder(dfPlugin.getDatafusionSettings().getSnapshot()).build();
             try (Arena arena = Arena.ofConfined()) {
@@ -235,7 +300,7 @@ public class GetService implements Closeable {
                 NativeBridge.executeQueryAsync(
                     readerPtr,
                     GET_BY_ID_TABLE_ALIAS,
-                    EMPTY_PLAN,
+                    plan,
                     runtimePtr,
                     0L,
                     configSegment.address(),

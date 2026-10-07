@@ -12,7 +12,7 @@ use crate::indexed_table::stream::FilterStrategy;
 /// is built natively via the DataFrame API with a single pushed-down filter on
 /// a stored reserved column — no Substrait, no planner round-trip. Used by the
 /// pluggable-dataformat get-by-id path (`GetService`), not by user search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InternalSearch {
     /// Not an internal lookup — decode `plan_ptr` as Substrait as usual.
     Off,
@@ -22,11 +22,23 @@ pub enum InternalSearch {
     /// Seq-no scan: `_seq_no > bound`, projecting only id/seq/term/version.
     /// Used by version-map restore on crash recovery.
     SeqNoAbove(i64),
+    /// Batched get-by-row-id: `__row_id__ IN (..)`, one row per id. Serves the bulk
+    /// update prefetch, which resolves many row ids in one shard and reads them in a
+    /// single pass so the reader open, FFM crossing, stream setup and any shared
+    /// parquet page are paid once instead of per row.
+    ///
+    /// Row ids ride in `plan_ptr`/`plan_len` rather than `internal_search_bound`,
+    /// which holds only a scalar. That buffer is already part of the FFM signature and
+    /// is empty for the other internal-search modes, so carrying the list there needs
+    /// no new argument. `Arc` keeps cloning the variant cheap.
+    ByRowIds(std::sync::Arc<Vec<i64>>),
 }
 
 impl InternalSearch {
-    /// Decodes the FFM wire pair `(mode, bound)`. `mode`: 0 = Off, 1 = ByRowId,
-    /// 2 = SeqNoAbove. Any other value is treated as Off (forward-compatible).
+    /// Decodes the scalar-only FFM wire pair `(mode, bound)`. `mode`: 0 = Off,
+    /// 1 = ByRowId, 2 = SeqNoAbove. Any other value — including the batched mode 3,
+    /// whose row ids do not fit in a scalar — is treated as Off (forward-compatible).
+    /// Use [`InternalSearch::from_wire_with_plan`] to decode every mode.
     pub fn from_wire(mode: i64, bound: i64) -> Self {
         match mode {
             1 => InternalSearch::ByRowId(bound),
@@ -35,11 +47,35 @@ impl InternalSearch {
         }
     }
 
+    /// Decodes the full FFM wire triple `(mode, bound, plan_bytes)`, adding mode 3
+    /// (`ByRowIds`) to what [`InternalSearch::from_wire`] handles.
+    ///
+    /// For mode 3 the row ids come from `plan_bytes` as packed little-endian `i64`s and
+    /// `bound` is unused; that buffer carries the Substrait plan for normal search and is
+    /// empty for the other internal-search modes, so reusing it needs no extra FFM
+    /// argument. A trailing partial element is ignored rather than failing the query — a
+    /// malformed buffer degrades to reading fewer rows, and the Java caller falls back to
+    /// per-row reads for whatever it did not get back.
+    pub fn from_wire_with_plan(mode: i64, bound: i64, plan_bytes: &[u8]) -> Self {
+        if mode == 3 {
+            return InternalSearch::ByRowIds(std::sync::Arc::new(decode_row_ids(plan_bytes)));
+        }
+        InternalSearch::from_wire(mode, bound)
+    }
+
     /// Whether this is an engine-internal point lookup (i.e. not [`InternalSearch::Off`],
     /// the normal user-search path).
-    pub fn is_internal_search(self) -> bool {
+    pub fn is_internal_search(&self) -> bool {
         !matches!(self, InternalSearch::Off)
     }
+}
+
+/// Decodes packed little-endian `i64` row ids. Ignores a trailing partial element.
+fn decode_row_ids(bytes: &[u8]) -> Vec<i64> {
+    bytes
+        .chunks_exact(8)
+        .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+        .collect()
 }
 
 /// Query-scoped configuration. Owned by value after FFM decode.
@@ -313,5 +349,65 @@ mod tests {
         let ptr = &wire as *const _ as i64;
         let c = unsafe { DatafusionQueryConfig::from_ffm_ptr(ptr) };
         assert_eq!(c.force_strategy, None);
+    }
+}
+
+#[cfg(test)]
+mod batched_row_id_wire_tests {
+    use super::*;
+
+    fn pack(ids: &[i64]) -> Vec<u8> {
+        ids.iter().flat_map(|id| id.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn decodes_packed_row_ids() {
+        let ids = [0i64, 1, 42, 9_999_999];
+        match InternalSearch::from_wire_with_plan(3, 0, &pack(&ids)) {
+            InternalSearch::ByRowIds(decoded) => assert_eq!(decoded.as_slice(), &ids),
+            other => panic!("expected ByRowIds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignores_a_trailing_partial_element() {
+        // A truncated buffer must drop the partial id, not fail the query — the Java
+        // caller re-reads whatever it did not get back.
+        let mut bytes = pack(&[7i64, 8]);
+        bytes.truncate(bytes.len() - 3);
+        match InternalSearch::from_wire_with_plan(3, 0, &bytes) {
+            InternalSearch::ByRowIds(decoded) => assert_eq!(decoded.as_slice(), &[7i64]),
+            other => panic!("expected ByRowIds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scalar_modes_ignore_the_plan_buffer() {
+        assert_eq!(
+            InternalSearch::from_wire_with_plan(1, 5, &pack(&[1, 2])),
+            InternalSearch::ByRowId(5)
+        );
+        assert_eq!(
+            InternalSearch::from_wire_with_plan(2, 9, &pack(&[1, 2])),
+            InternalSearch::SeqNoAbove(9)
+        );
+        assert_eq!(
+            InternalSearch::from_wire_with_plan(0, 0, &[]),
+            InternalSearch::Off
+        );
+    }
+
+    #[test]
+    fn batched_mode_without_a_plan_is_off_on_the_scalar_decoder() {
+        // from_wire cannot see the row ids, so it must not claim a batched search.
+        assert_eq!(InternalSearch::from_wire(3, 0), InternalSearch::Off);
+    }
+
+    #[test]
+    fn unknown_mode_is_off() {
+        assert_eq!(
+            InternalSearch::from_wire_with_plan(99, 0, &[]),
+            InternalSearch::Off
+        );
     }
 }
