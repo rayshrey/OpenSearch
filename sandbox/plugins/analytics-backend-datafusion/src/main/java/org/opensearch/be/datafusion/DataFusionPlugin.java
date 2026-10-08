@@ -1086,6 +1086,17 @@ public class DataFusionPlugin extends Plugin
     }
 
     @Override
+    public Map<String, DocumentLookupResult> prefetchByIds(
+        List<String> ids,
+        IndexReaderProvider.Reader reader,
+        Index index,
+        DocumentMetadataResolver resolver
+    ) throws IOException {
+        GetService getService = getServiceOrThrow();
+        return getService.documentLookupService(resolver).prefetchByIds(ids, reader, index);
+    }
+
+    @Override
     public DocumentLookupResult getVersionMetadata(
         String id,
         IndexReaderProvider.Reader reader,

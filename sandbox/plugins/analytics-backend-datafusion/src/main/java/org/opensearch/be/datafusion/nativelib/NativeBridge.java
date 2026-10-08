@@ -1094,6 +1094,15 @@ public final class NativeBridge {
     public static final long INTERNAL_SEARCH_BY_ROW_ID = 1L;
     /** {@code internal_search_mode}: seq-no scan — native plan filters {@code _seq_no > bound}, {@code substraitPlan} ignored. */
     public static final long INTERNAL_SEARCH_SEQ_NO_ABOVE = 2L;
+    /**
+     * {@code internal_search_mode}: batched get-by-row-id — native plan filters
+     * {@code __row_id__ IN (..)}. The row ids ride in {@code substraitPlan} as packed
+     * little-endian {@code long}s (that buffer is unused by the other internal-search modes, so
+     * carrying the list there needs no additional FFM argument); {@code internalSearchBound} is
+     * ignored. Returns one row per matching id in unspecified order — callers key the results by
+     * the {@code __row_id__} column.
+     */
+    public static final long INTERNAL_SEARCH_BY_ROW_IDS = 3L;
 
     public static void executeQueryAsync(
         long readerPtr,
