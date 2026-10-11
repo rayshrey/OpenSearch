@@ -258,50 +258,9 @@ pub async fn execute_with_context(
             logical_plan.display_indent()
         );
 
-        // Empty shard: skip physical planning (ParquetExec errors on zero files)
-        // and emit an EmptyExec stream with the logical plan's output schema.
-        //
-        // Gate on a non-empty table_name so this fires ONLY for real shard scans. Hash-shuffle
-        // WORKER sessions (create_worker_session_context) also carry empty object_metas — they
-        // scan registered StreamingTables, not parquet files — but use an empty table_name. Without
-        // this guard a worker's join/aggregate plan would short-circuit to EmptyExec and silently
-        // return zero rows (regression caught by HashShuffleJoinIT after the #21754 empty-index merge).
-        if handle.object_metas.is_empty() && !handle.table_name.is_empty() {
-            use datafusion::physical_plan::empty::EmptyExec;
-            use datafusion::physical_plan::ExecutionPlan;
-            let plan_schema: arrow::datatypes::SchemaRef =
-                Arc::new(logical_plan.schema().as_arrow().clone());
-            let plan_schema = crate::schema_coerce::coerce_inferred_schema(plan_schema);
-            let empty_exec = EmptyExec::new(Arc::clone(&plan_schema));
-            let df_stream = empty_exec.execute(0, handle.ctx.task_ctx()).map_err(|e| {
-                error!("execute_with_context: failed to create empty stream: {}", e);
-                e
-            })?;
-
-            let (cross_rt_stream, abort_handle, _task_done) =
-                CrossRtStream::new_with_df_error_stream_cancellable(
-                    df_stream,
-                    cpu_executor.clone(),
-                    None,
-                );
-            if let Some(h) = abort_handle {
-                crate::query_tracker::set_abort_handle(context_id, h);
-            }
-            if let Some(rt) = cpu_executor.handle() {
-                crate::query_tracker::set_cpu_runtime_handle(context_id, rt);
-            }
-            let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                cross_rt_stream.schema(),
-                cross_rt_stream,
-            );
-            return Ok::<
-                (
-                    i64,
-                    Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
-                ),
-                DataFusionError,
-            >((Box::into_raw(Box::new(wrapped)) as i64, None));
-        }
+        // Empty shards need no special case here: create_session_context registers an EmptyTable for a
+        // shard with no parquet files, so planning yields an EmptyExec source and aggregates without
+        // GROUP BY still produce their single row (e.g. count() = 0) instead of an empty result.
 
         let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
         // create_physical_plan runs all registered physical optimizer rules including

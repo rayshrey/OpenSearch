@@ -380,23 +380,41 @@ pub async unsafe fn create_session_context(
         listing_options
     };
 
-    let table_config = ListingTableConfig::new(shard_view.table_path.clone())
-        .with_listing_options(listing_options)
-        .with_schema(resolved_schema);
+    // Empty shard (no parquet files in the catalog snapshot): register an EmptyTable instead of a
+    // ListingTable. A ListingTable resolves its files through the runtime's list-files cache, and
+    // DataFusion's DefaultListFilesCache silently refuses to store an EMPTY list, so the lookup misses
+    // and DataFusion lists the shard's parquet directory on disk. Files there that are not in the
+    // catalog (e.g. a fully-deleted generation still on a replica until its next commit) would then be
+    // scanned without deleted-doc masking. An EmptyTable plans to EmptyExec on every path (vanilla and
+    // prepare_partial_plan), with the plan-widened schema so partial-aggregate state types match the
+    // other shards.
+    let provider: Arc<dyn datafusion::catalog::TableProvider> =
+        if shard_view.object_metas.is_empty() {
+            log_debug!(
+                "create_session_context: empty shard '{}' ({}): registering EmptyTable",
+                register_name,
+                shard_view.table_path.as_str()
+            );
+            Arc::new(datafusion::catalog::empty::EmptyTable::new(resolved_schema))
+        } else {
+            let table_config = ListingTableConfig::new(shard_view.table_path.clone())
+                .with_listing_options(listing_options)
+                .with_schema(resolved_schema);
 
-    // Wire the global statistics cache into the ListingTable.
-    let stats_cache = runtime.runtime_env.cache_manager.get_file_statistic_cache();
-    let provider = Arc::new(
-        ListingTable::try_new(table_config)
-            .map_err(|e| {
-                error!(
-                    "create_session_context: failed to create listing table: {}",
-                    e
-                );
-                e
-            })?
-            .with_cache(stats_cache),
-    );
+            // Wire the global statistics cache into the ListingTable.
+            let stats_cache = runtime.runtime_env.cache_manager.get_file_statistic_cache();
+            Arc::new(
+                ListingTable::try_new(table_config)
+                    .map_err(|e| {
+                        error!(
+                            "create_session_context: failed to create listing table: {}",
+                            e
+                        );
+                        e
+                    })?
+                    .with_cache(stats_cache),
+            )
+        };
 
     ctx.register_table(register_name.as_str(), provider)
         .map_err(|e| {
