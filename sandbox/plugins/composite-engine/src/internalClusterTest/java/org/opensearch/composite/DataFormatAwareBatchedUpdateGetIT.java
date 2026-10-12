@@ -367,6 +367,78 @@ public class DataFormatAwareBatchedUpdateGetIT extends AbstractCompositeEngineIT
         }
     }
 
+    /**
+     * Updates whose rows are scattered across many row groups and data pages of ONE file. The row
+     * group and page geometry is forced small so a single flushed generation holds tens of row
+     * groups, which is the shape a batched read has to map positions through: ids are resolved to a
+     * row group and an offset inside it, row groups holding no requested row are never opened, and
+     * the rows must still come back matched to their own documents.
+     *
+     * <p>The batch is also well past the 20-entry limit below which a predicate over the row-id
+     * column could be expanded into prunable comparisons, so it covers the size at which a
+     * predicate-based read degenerates into a full-file scan.
+     */
+    public void testBulkPartialUpdatesSpreadAcrossRowGroupsOfOneFile() throws Exception {
+        final int docs = 1_000;
+        final int rowGroupRows = 100;
+        createIndexWithRowGroupGeometry(1, rowGroupRows, 20);
+        seedAndRefresh(docs);
+
+        // One update per row group, so every row group is touched but only a single row in each.
+        List<Integer> updated = new ArrayList<>();
+        BulkRequestBuilder bulk = client().prepareBulk();
+        for (int i = 7; i < docs; i += rowGroupRows) {
+            updated.add(i);
+            bulk.add(client().prepareUpdate(INDEX, id(i)).setDoc("value", 2000 + i));
+        }
+        assertEquals("one update per row group", docs / rowGroupRows, updated.size());
+        assertNoBulkFailures(bulk.get());
+
+        for (int i : updated) {
+            GetResponse got = get(id(i));
+            assertTrue("doc " + id(i) + " must exist after update", got.isExists());
+            Map<String, Object> source = got.getSourceAsMap();
+            assertEquals("updated field for " + id(i), 2000 + i, value(got));
+            assertEquals("untouched name for " + id(i), "orig-" + i, source.get("name"));
+            assertEquals("untouched note for " + id(i), "note-" + i, source.get("note"));
+        }
+        // Documents the batch did not name must be untouched, which a misread position would break.
+        for (int i : List.of(0, 6, 8, rowGroupRows - 1, docs / 2, docs - 1)) {
+            if (updated.contains(i)) {
+                continue;
+            }
+            GetResponse got = get(id(i));
+            assertEquals("unrequested doc " + id(i) + " must keep its seeded value", i, value(got));
+            assertEquals("version of an unrequested doc", 1L, got.getVersion());
+        }
+    }
+
+    /**
+     * As {@link #createIndex(int)}, but with the parquet row group and data page sizes forced small
+     * so a modest seed produces many row groups and pages in one file.
+     */
+    private void createIndexWithRowGroupGeometry(int shards, int rowGroupRows, int pageRows) {
+        Settings settings = Settings.builder()
+            .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, shards)
+            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+            .put("index.pluggable.dataformat.enabled", true)
+            .put("index.pluggable.dataformat", "composite")
+            .put("index.composite.primary_data_format", "parquet")
+            .putList("index.composite.secondary_data_formats", "lucene")
+            .put(IndexMetadata.INDEX_APPEND_ONLY_ENABLED_SETTING.getKey(), false)
+            .put("index.refresh_interval", -1)
+            .put("index.parquet.row_group_max_rows", rowGroupRows)
+            .put("index.parquet.page_row_limit", pageRows)
+            .build();
+        client().admin()
+            .indices()
+            .prepareCreate(INDEX)
+            .setSettings(settings)
+            .setMapping("name", "type=keyword", "value", "type=integer", "note", "type=keyword")
+            .get();
+        ensureGreen(INDEX);
+    }
+
     private static String threadField(int threadId) {
         return "t" + threadId;
     }
