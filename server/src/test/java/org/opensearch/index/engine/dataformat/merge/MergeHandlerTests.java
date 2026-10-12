@@ -22,9 +22,12 @@ import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -68,6 +71,63 @@ public class MergeHandlerTests extends OpenSearchTestCase {
 
     private MergeHandler newHandler(Supplier<GatedCloseable<CatalogSnapshot>> snapshotSupplier) {
         return new MergeHandler(snapshotSupplier, merger, SHARD_ID, mergePolicy, mergeListener, () -> 1L);
+    }
+
+    /**
+     * A segment for {@code generation} whose Lucene file set names {@code livFile}. A delete-bearing
+     * refresh rewrites that {@code .liv} at a new delete generation, which changes the
+     * {@link WriterFileSet} and therefore the {@link Segment} record's identity while the
+     * generation stays the same.
+     */
+    private static Segment segWithLiv(long generation, String livFile) {
+        WriterFileSet lucene = new WriterFileSet("/idx", generation, Set.of("_x.cfs", livFile), 100L, 1L);
+        return new Segment(generation, Map.of("lucene", lucene));
+    }
+
+    /**
+     * Two background merges must not both claim the same writer generation. The in-flight guard keys
+     * {@code currentlyMergingSegments} on the {@link Segment} record, whose {@code equals} covers the
+     * per-format {@link WriterFileSet} (and thus the {@code .liv} filename). When a delete-bearing
+     * refresh republishes a generation with a rewritten {@code .liv}, the new record is unequal to the
+     * registered one, the conflict check misses, and a second merge claims a generation that is already
+     * being merged. Whichever merge commits first consumes the Lucene segment; the other then fails
+     * resolving its sources ("Expected N Lucene segments ... but found only N-1"), and unwinding that
+     * prepared merge trips an AssertionError in IndexWriter.closeMergeReaders that closes the shared
+     * writer and fails the shard.
+     */
+    public void testFindAndRegisterMerges_SameGenerationNotClaimedTwiceAfterLivRewrite() throws Exception {
+        AtomicReference<List<Segment>> catalog = new AtomicReference<>(List.of());
+        CatalogSnapshot snapshot = mock(CatalogSnapshot.class);
+        when(snapshot.getSegments()).thenAnswer(inv -> catalog.get());
+        MergeHandler handler = new MergeHandler(
+            () -> new GatedCloseable<>(snapshot, () -> {}),
+            merger,
+            SHARD_ID,
+            mergePolicy,
+            mergeListener,
+            () -> 1L
+        );
+
+        // Generation 744 is published at delete generation 2 and a merge claims it.
+        Segment before = segWithLiv(744, "_x_2.liv");
+        Segment peerA = seg(1);
+        catalog.set(List.of(before, peerA));
+        when(mergePolicy.findMergeCandidates(anyList())).thenReturn(List.of(List.of(before, peerA)));
+        handler.findAndRegisterMerges();
+        assertEquals("first merge over generation 744 registers", 1, handler.getPendingMergeCount());
+
+        // A delete-bearing refresh rewrites generation 744's .liv. Same generation, new file set.
+        Segment after = segWithLiv(744, "_x_3.liv");
+        Segment peerB = seg(2);
+        catalog.set(List.of(after, peerB));
+        when(mergePolicy.findMergeCandidates(anyList())).thenReturn(List.of(List.of(after, peerB)));
+        handler.findAndRegisterMerges();
+
+        assertEquals(
+            "generation 744 is already being merged, so a second merge must not claim it",
+            1,
+            handler.getPendingMergeCount()
+        );
     }
 
     public void testEmptyHandler_HasNoPendingMerges() {

@@ -44,7 +44,12 @@ import java.util.function.Supplier;
 public class MergeHandler {
 
     private final Deque<OneMerge> pendingMerges = new ArrayDeque<>();
-    private final Set<Segment> currentlyMergingSegments = new HashSet<>();
+    // Keyed by writer generation, not by the Segment record. Segment.equals covers the per-format
+    // WriterFileSet (including the .liv filename), so a delete-bearing refresh that republishes a
+    // generation with a rewritten .liv produces an unequal record. Keying on the record let the
+    // conflict check miss and allowed two merges to claim one generation. Generations come from a
+    // single monotonic counter and are never reused, so they are a stable identity.
+    private final Set<Long> currentlyMergingGenerations = new HashSet<>();
     private final Supplier<GatedCloseable<CatalogSnapshot>> snapshotSupplier;
     private final MergePolicy mergePolicy;
     private final MergeListener mergeListener;
@@ -110,7 +115,7 @@ public class MergeHandler {
                 boolean hasConflict = false;
                 synchronized (this) {
                     for (Segment seg : mergeGroup) {
-                        if (currentlyMergingSegments.contains(seg)) {
+                        if (currentlyMergingGenerations.contains(seg.generation())) {
                             hasConflict = true;
                             break;
                         }
@@ -140,7 +145,7 @@ public class MergeHandler {
         for (OneMerge oneMerge : oneMerges) {
             boolean isValidMerge = true;
             for (Segment segment : oneMerge.getSegmentsToMerge()) {
-                if (currentlyMergingSegments.contains(segment)) {
+                if (currentlyMergingGenerations.contains(segment.generation())) {
                     isValidMerge = false;
                     break;
                 }
@@ -162,9 +167,16 @@ public class MergeHandler {
 
     private synchronized boolean registerMerge(OneMerge merge, boolean addToPending) {
         try (GatedCloseable<CatalogSnapshot> catalogSnapshotRef = snapshotSupplier.get()) {
-            List<Segment> catalogSegments = catalogSnapshotRef.get().getSegments();
+            // Match on generation, not on the Segment record: Segment.equals covers the per-format
+            // WriterFileSet, so a generation republished by a delete-bearing refresh (rewritten .liv)
+            // is an unequal record and would look absent from the catalog, silently dropping a merge
+            // whose sources are all still live.
+            Set<Long> catalogGenerations = new HashSet<>();
+            for (Segment catalogSegment : catalogSnapshotRef.get().getSegments()) {
+                catalogGenerations.add(catalogSegment.generation());
+            }
             for (Segment mergeSegment : merge.getSegmentsToMerge()) {
-                if (!catalogSegments.contains(mergeSegment)) {
+                if (catalogGenerations.contains(mergeSegment.generation()) == false) {
                     return false;
                 }
             }
@@ -175,7 +187,7 @@ public class MergeHandler {
         if (addToPending) { // Skips this for force merges. Avoid 2 workers executing the merge.
             pendingMerges.add(merge);
         }
-        currentlyMergingSegments.addAll(merge.getSegmentsToMerge());
+        merge.getSegmentsToMerge().forEach(s -> currentlyMergingGenerations.add(s.generation()));
         mergeListener.addMergingSegment(merge.getSegmentsToMerge());
         logger.debug(() -> new ParameterizedMessage("Registered merge [{}], pendingMerges: [{}]", merge, pendingMerges));
         return true;
@@ -262,7 +274,7 @@ public class MergeHandler {
 
     private synchronized void removeMergingSegments(OneMerge oneMerge) {
         pendingMerges.remove(oneMerge);
-        oneMerge.getSegmentsToMerge().forEach(currentlyMergingSegments::remove);
+        oneMerge.getSegmentsToMerge().forEach(s -> currentlyMergingGenerations.remove(s.generation()));
         mergeListener.removeMergingSegment(oneMerge.getSegmentsToMerge());
     }
 
