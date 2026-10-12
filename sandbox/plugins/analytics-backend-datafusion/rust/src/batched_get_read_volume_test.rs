@@ -238,10 +238,10 @@ impl ObjectStore for CountingStore {
 // ── Harness ─────────────────────────────────────────────────────────────────
 
 struct GetOutcome {
-    /// `__row_id__` of every row the get returned, ascending. Sorted because arrival order is not
-    /// part of the contract — the Java side keys rows by `__row_id__`, and DataFusion is free to
-    /// split one file across partitions.
-    row_ids: Vec<i64>,
+    /// Every row the get returned as `(__row_id__, k, v)`, ascending by row id. Sorted because
+    /// arrival order is not part of the contract — the Java side keys rows by `__row_id__`, and
+    /// DataFusion is free to split one file across partitions.
+    rows: Vec<(i64, String, i64)>,
     /// Field names of the returned schema, to compare paths for output parity.
     schema_fields: Vec<String>,
     bytes: u64,
@@ -249,10 +249,15 @@ struct GetOutcome {
     calls: u64,
 }
 
-/// Runs one batched get for `row_ids` against a freshly written fixture, and reports both the rows
-/// and the read volume. A fresh fixture (and therefore a cold metadata cache) per call keeps the
-/// numbers comparable between cases.
+/// Runs one batched get for `row_ids` and reports both the rows and the read volume.
 async fn run_batched_get(row_ids: &[i64]) -> (GetOutcome, u64) {
+    run_get(InternalSearch::ByRowIds(Arc::new(row_ids.to_vec()))).await
+}
+
+/// Runs one engine-internal get against a freshly written fixture, and reports both the rows and
+/// the read volume. A fresh fixture (and therefore a cold metadata cache) per call keeps the
+/// numbers comparable between cases.
+async fn run_get(internal_search: InternalSearch) -> (GetOutcome, u64) {
     let dir = tempfile::tempdir().expect("tempdir");
     // Canonicalised because LocalFileSystem reports canonical paths while a ListingTableUrl keeps
     // what it was given: on macOS /var is a symlink to /private/var, and the mismatch makes the
@@ -300,10 +305,10 @@ async fn run_batched_get(row_ids: &[i64]) -> (GetOutcome, u64) {
         None,
         &[],
         &[],
-        InternalSearch::ByRowIds(Arc::new(row_ids.to_vec())),
+        internal_search,
     )
     .await
-    .expect("batched get");
+    .expect("internal-search get");
 
     let stream = unsafe {
         *Box::from_raw(
@@ -324,22 +329,44 @@ async fn run_batched_get(row_ids: &[i64]) -> (GetOutcome, u64) {
 
     let mut returned = Vec::new();
     for batch in &batches {
-        let idx = batch
-            .schema()
-            .index_of(crate::ROW_ID_COLUMN_NAME)
-            .expect("__row_id__ in output");
-        let col = batch
-            .column(idx)
+        let schema = batch.schema();
+        let row_ids = batch
+            .column(
+                schema
+                    .index_of(crate::ROW_ID_COLUMN_NAME)
+                    .expect("__row_id__"),
+            )
             .as_any()
             .downcast_ref::<Int64Array>()
-            .expect("__row_id__ is Int64");
-        returned.extend((0..col.len()).map(|i| col.value(i)));
+            .expect("__row_id__ is Int64")
+            .clone();
+        // Cast rather than downcast: the read declares view types (as the table path does), so `k`
+        // arrives as Utf8View, and a plain-Utf8 read must compare equal.
+        let ks = arrow::compute::cast(
+            batch.column(schema.index_of("k").expect("k")),
+            &DataType::Utf8,
+        )
+        .expect("cast k to Utf8");
+        let ks = ks
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("k is Utf8 after cast")
+            .clone();
+        let vs = batch
+            .column(schema.index_of("v").expect("v"))
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("v is Int64")
+            .clone();
+        returned.extend(
+            (0..batch.num_rows()).map(|i| (row_ids.value(i), ks.value(i).to_string(), vs.value(i))),
+        );
     }
 
     cpu_executor.join_blocking();
     (
         GetOutcome {
-            row_ids: {
+            rows: {
                 let mut sorted = returned;
                 sorted.sort_unstable();
                 sorted
@@ -353,10 +380,16 @@ async fn run_batched_get(row_ids: &[i64]) -> (GetOutcome, u64) {
     )
 }
 
+impl GetOutcome {
+    fn row_ids(&self) -> Vec<i64> {
+        self.rows.iter().map(|(id, _, _)| *id).collect()
+    }
+}
+
 fn report(case: &str, outcome: &GetOutcome, file_size: u64) {
     println!(
         "BATCH-GET {case}: rows={} store_bytes={} ({:.1}% of {} byte file) ranges={} calls={}",
-        outcome.row_ids.len(),
+        outcome.rows.len(),
         outcome.bytes,
         100.0 * outcome.bytes as f64 / file_size as f64,
         file_size,
@@ -378,7 +411,7 @@ async fn batched_get_of_spread_ids_reads_a_fraction_of_the_file() {
     let (outcome, file_size) = run_batched_get(&ids).await;
     report("100 spread ids", &outcome, file_size);
 
-    assert_eq!(outcome.row_ids, ids, "a get must return exactly its ids");
+    assert_eq!(outcome.row_ids(), ids, "a get must return exactly its ids");
     assert!(
         outcome.bytes < file_size / 4,
         "a 100-id get read {} of {} bytes ({:.1}%) — the scan is not restricted to the pages \
@@ -399,7 +432,7 @@ async fn batched_get_of_clustered_ids_reads_one_page_per_column() {
     let (outcome, file_size) = run_batched_get(&ids).await;
     report("50 clustered ids", &outcome, file_size);
 
-    assert_eq!(outcome.row_ids, ids, "a get must return exactly its ids");
+    assert_eq!(outcome.row_ids(), ids, "a get must return exactly its ids");
     assert!(
         outcome.bytes < file_size / 10,
         "a 50-id single-page get read {} of {} bytes ({:.1}%)",
@@ -420,7 +453,7 @@ async fn batched_get_just_past_the_in_list_rewrite_limit_still_prunes() {
     let (outcome, file_size) = run_batched_get(&ids).await;
     report("21 spread ids", &outcome, file_size);
 
-    assert_eq!(outcome.row_ids, ids, "a get must return exactly its ids");
+    assert_eq!(outcome.row_ids(), ids, "a get must return exactly its ids");
     assert!(
         outcome.bytes < file_size / 7,
         "a 21-id get read {} of {} bytes ({:.1}%)",
@@ -448,7 +481,7 @@ async fn batched_get_returns_boundary_rows() {
 
     let (outcome, file_size) = run_batched_get(&ids).await;
     report("boundary ids", &outcome, file_size);
-    assert_eq!(outcome.row_ids, ids);
+    assert_eq!(outcome.row_ids(), ids);
 }
 
 /// A single id is the shape the old per-document get had, and must stay the cheapest read.
@@ -460,7 +493,7 @@ async fn batched_get_of_one_id_reads_one_row() {
     let (outcome, file_size) = run_batched_get(&ids).await;
     report("1 id", &outcome, file_size);
 
-    assert_eq!(outcome.row_ids, ids);
+    assert_eq!(outcome.row_ids(), ids);
     assert!(
         outcome.bytes < file_size / 10,
         "a 1-id get read {} of {} bytes",
@@ -477,7 +510,7 @@ async fn batched_get_skips_ids_beyond_the_file() {
     let ids = vec![10, NUM_ROWS, NUM_ROWS + 5_000, NUM_ROWS - 1];
 
     let (outcome, _file_size) = run_batched_get(&ids).await;
-    assert_eq!(outcome.row_ids, vec![10, NUM_ROWS - 1]);
+    assert_eq!(outcome.row_ids(), vec![10, NUM_ROWS - 1]);
 }
 
 /// Every column of the row is returned, in the file's field order: the Java side maps the batch
@@ -487,6 +520,75 @@ async fn batched_get_skips_ids_beyond_the_file() {
 async fn batched_get_returns_every_column() {
     let _globals = crate::test_process_globals::lock();
     let (outcome, _file_size) = run_batched_get(&[1, 2, 3]).await;
+    assert_eq!(
+        outcome.schema_fields,
+        vec![
+            "k".to_string(),
+            "v".to_string(),
+            crate::ROW_ID_COLUMN_NAME.to_string()
+        ]
+    );
+}
+
+/// A batch must return exactly what the same ids fetched one at a time through the single-row get
+/// (`InternalSearch::ByRowId`) return: same values, same column names and order. The per-document
+/// path is what the prefetch replaces, so any divergence here is a corrupted update.
+#[tokio::test]
+async fn batched_get_matches_the_single_row_get() {
+    let _globals = crate::test_process_globals::lock();
+    let ids: Vec<i64> = vec![5, 777, 1_000, 49_999, NUM_ROWS - 1];
+
+    let (batched, _) = run_batched_get(&ids).await;
+    let mut singles = Vec::new();
+    let mut single_schema = None;
+    for &id in &ids {
+        let (single, _) = run_get(InternalSearch::ByRowId(id)).await;
+        assert_eq!(single.rows.len(), 1, "a single-row get returns one row");
+        singles.extend(single.rows);
+        single_schema = Some(single.schema_fields);
+    }
+
+    assert_eq!(
+        batched.rows, singles,
+        "row values must match the per-document get"
+    );
+    assert_eq!(
+        Some(batched.schema_fields),
+        single_schema,
+        "output schema must match the per-document get"
+    );
+}
+
+/// Ids arrive sorted from `DocumentLookupService.prefetchByIds`, but the read must not depend on
+/// that, nor return a row twice if an id repeats.
+#[tokio::test]
+async fn batched_get_handles_unsorted_and_repeated_ids() {
+    let _globals = crate::test_process_globals::lock();
+    let ids: Vec<i64> = vec![9_000, 12, 50_500, 12, 9_000, 3];
+
+    let (outcome, _file_size) = run_batched_get(&ids).await;
+    assert_eq!(outcome.row_ids(), vec![3, 12, 9_000, 50_500]);
+}
+
+/// Asking for every row is the degenerate case: it must come back whole, which also proves the
+/// selection covers the row groups' full extent and not just their first pages.
+#[tokio::test]
+async fn batched_get_of_every_row_returns_the_file() {
+    let _globals = crate::test_process_globals::lock();
+    let ids: Vec<i64> = (0..NUM_ROWS).collect();
+
+    let (outcome, _file_size) = run_batched_get(&ids).await;
+    assert_eq!(outcome.rows.len() as i64, NUM_ROWS);
+    assert_eq!(outcome.row_ids(), ids);
+}
+
+/// An id past the end of every row group leaves nothing to read. The batch must still produce a
+/// well-formed empty result with the file's schema rather than failing.
+#[tokio::test]
+async fn batched_get_of_only_unknown_ids_returns_no_rows() {
+    let _globals = crate::test_process_globals::lock();
+    let (outcome, _file_size) = run_batched_get(&[NUM_ROWS, NUM_ROWS + 1, -5]).await;
+    assert!(outcome.rows.is_empty());
     assert_eq!(
         outcome.schema_fields,
         vec![

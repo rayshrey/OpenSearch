@@ -55,6 +55,26 @@ pub async fn execute_query(
     sort_orders: &[String],
     internal_search: crate::datafusion_query_config::InternalSearch,
 ) -> Result<i64, DataFusionError> {
+    // Batched engine-internal get (bulk-update prefetch): the ids ARE row positions, so the rows
+    // are read positionally instead of being selected by a predicate over a ListingTable. See
+    // `positional_get` for why a predicate cannot do that job past 20 ids.
+    if let crate::datafusion_query_config::InternalSearch::ByRowIds(ref row_ids) = internal_search {
+        let (df_stream, _plan) = crate::positional_get::read_rows_at_positions(
+            &table_path,
+            object_metas.as_ref(),
+            Arc::clone(&shard_store),
+            runtime,
+            row_ids,
+        )
+        .await?;
+        return Ok(wrap_in_cross_rt_stream(
+            df_stream,
+            cpu_executor,
+            context_id,
+            phantom_corrector,
+        ));
+    }
+
     // Build per-query RuntimeEnv (optional pool overlay) + register the shard store.
     let runtime_env = build_query_runtime_env_with_store(
         runtime,
@@ -96,7 +116,23 @@ pub async fn execute_query(
         e
     })?;
 
-    // Wrap in CrossRtStream — CPU work runs on DedicatedExecutor
+    Ok(wrap_in_cross_rt_stream(
+        df_stream,
+        cpu_executor,
+        context_id,
+        phantom_corrector,
+    ))
+}
+
+/// Hand a DataFusion stream to the CPU executor and package it as the raw stream pointer this path
+/// returns: registers the query's abort handle and CPU runtime, attaches the phantom corrector when
+/// the caller resolved one, and leaks the adapter for the FFM caller to reclaim.
+fn wrap_in_cross_rt_stream(
+    df_stream: datafusion::execution::SendableRecordBatchStream,
+    cpu_executor: DedicatedExecutor,
+    context_id: i64,
+    phantom_corrector: Option<Arc<crate::phantom_corrector::PhantomCorrector>>,
+) -> i64 {
     let (cross_rt_stream, abort_handle, _task_done) =
         CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor.clone(), None);
 
@@ -107,7 +143,6 @@ pub async fn execute_query(
         crate::query_tracker::set_cpu_runtime_handle(context_id, rt);
     }
 
-    // Attach phantom corrector for self-correcting budget (if provided)
     let cross_rt_stream = match phantom_corrector {
         Some(corrector) => cross_rt_stream.with_phantom_corrector(corrector),
         None => cross_rt_stream,
@@ -118,7 +153,7 @@ pub async fn execute_query(
         cross_rt_stream,
     );
 
-    Ok(Box::into_raw(Box::new(wrapped)) as i64)
+    Box::into_raw(Box::new(wrapped)) as i64
 }
 
 /// Build the query DataFrame against the table already registered in `ctx`.
@@ -176,21 +211,10 @@ async fn internal_search_dataframe(
         InternalSearch::SeqNoAbove(seq_no_floor) => df
             .filter(col("_seq_no").gt(lit(seq_no_floor)))?
             .select_columns(&["_id", "_seq_no", "_primary_term", "_version"]),
-        // Batched point read. An IN list over `__row_id__` lowers to a disjunction of
-        // equalities, so DataFusion still prunes row groups and pages from the column's
-        // min/max statistics exactly as the single-row case does — but one scan now
-        // serves every requested id, and a page shared by several ids is decompressed
-        // once. No LIMIT: the predicate itself bounds the output to the ids asked for.
-        InternalSearch::ByRowIds(row_ids) => {
-            if row_ids.is_empty() {
-                return Err(DataFusionError::Execution(
-                    "internal search ByRowIds: empty row-id list".to_string(),
-                ));
-            }
-            df.filter(
-                col(crate::ROW_ID_COLUMN_NAME)
-                    .in_list(row_ids.iter().map(|&r| lit(r)).collect::<Vec<_>>(), false),
-            )
+        // A batch of row ids is a set of row positions, which `positional_get` reads directly;
+        // `execute_query` routes it there before any DataFrame is built.
+        InternalSearch::ByRowIds(_) => {
+            unreachable!("internal_search_dataframe called with ByRowIds")
         }
         InternalSearch::Off => unreachable!("internal_search_dataframe called with Off"),
     }

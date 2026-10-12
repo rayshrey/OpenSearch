@@ -41,6 +41,7 @@ pub mod native_error;
 pub mod partition_stream;
 pub mod patterns;
 pub mod phantom_corrector;
+pub mod positional_get;
 pub mod project_row_id_analyzer;
 pub mod project_row_id_optimizer;
 pub mod query_budget;
