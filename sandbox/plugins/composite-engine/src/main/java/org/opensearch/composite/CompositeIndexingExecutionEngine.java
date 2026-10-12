@@ -323,7 +323,26 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
                     );
 
                     if (mergeResult != null) {
-                        List<Segment> result = new ArrayList<>(refreshInput.existingSegments());
+                        // Carry forward the *refreshed* view of each surviving generation, not the
+                        // pre-refresh input. This refresh may have materialized new files for an
+                        // existing generation — most importantly a .liv when buffered deletes were
+                        // applied — and those are recorded only in the per-format refresh results
+                        // that produced newSegments. Seeding from refreshInput.existingSegments()
+                        // here silently reverted those generations to their pre-refresh file sets,
+                        // so a newly written .liv never reached the catalog while the Lucene reader
+                        // (reopened off the live IndexWriter) did reference it. That divergence then
+                        // surfaced on the remote store as a published commit naming a file which was
+                        // never uploaded, leaving any later recovery of the shard permanently broken.
+                        // Fall back to the input entry only for generations this refresh did not
+                        // re-capture.
+                        Map<Long, Segment> refreshedByGen = new HashMap<>();
+                        for (Segment refreshedSegment : newSegments) {
+                            refreshedByGen.put(refreshedSegment.generation(), refreshedSegment);
+                        }
+                        List<Segment> result = new ArrayList<>(refreshInput.existingSegments().size() + 1);
+                        for (Segment existing : refreshInput.existingSegments()) {
+                            result.add(refreshedByGen.getOrDefault(existing.generation(), existing));
+                        }
                         Segment mergedSegment = new Segment(
                             refreshInput.nextAvailableGeneration(),
                             mergeResult.getMergedWriterFileSet()
