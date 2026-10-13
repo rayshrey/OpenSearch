@@ -280,6 +280,8 @@ public class DataFormatAwareEngine implements Indexer {
     private final ConcurrentHashMap<BytesRef, PrefetchedDocument> prefetchedUpdateDocs = new ConcurrentHashMap<>();
     private final AtomicLong prefetchCacheGeneration = new AtomicLong();
     private final CounterMetric numPrefetchHits = new CounterMetric();
+    /** Guards the WARN in {@link #prefetchUpdateGets} so a repeating failure logs once per engine. */
+    private final AtomicBoolean prefetchFailureLogged = new AtomicBoolean();
     private final CounterMetric numPrefetchedDocs = new CounterMetric();
 
     /** A read-ahead lookup result plus the cache generation it was read under. */
@@ -2531,8 +2533,15 @@ public class DataFormatAwareEngine implements Indexer {
             }
             numPrefetchedDocs.inc(prefetched.size());
         } catch (Exception e) {
-            // Best-effort: fall back to per-document reads.
-            logger.debug("update prefetch skipped", e);
+            // Best-effort: the per-document get still produces the right document, so a failure here
+            // costs throughput, not correctness. Log the first one per engine at WARN all the same --
+            // at debug a permanently broken read-ahead is invisible, and every update silently pays
+            // the per-document path while the correctness tests stay green.
+            if (prefetchFailureLogged.compareAndSet(false, true)) {
+                logger.warn("update prefetch failed; falling back to per-document reads for this shard", e);
+            } else {
+                logger.debug("update prefetch skipped", e);
+            }
         }
     }
 
@@ -2586,13 +2595,13 @@ public class DataFormatAwareEngine implements Indexer {
         return cached.generation() == prefetchCacheGeneration.get() ? cached.result() : null;
     }
 
-    // visible for tests
-    long prefetchHitCount() {
+    /** Reads served from the read-ahead cache. Visible for tests, including out-of-package ITs. */
+    public long prefetchHitCount() {
         return numPrefetchHits.count();
     }
 
-    // visible for tests
-    long prefetchedDocCount() {
+    /** Rows parked by {@link #prefetchUpdateGets}. Visible for tests, including out-of-package ITs. */
+    public long prefetchedDocCount() {
         return numPrefetchedDocs.count();
     }
 

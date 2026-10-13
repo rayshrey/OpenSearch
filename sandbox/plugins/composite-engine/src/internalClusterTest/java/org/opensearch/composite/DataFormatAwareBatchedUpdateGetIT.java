@@ -13,6 +13,8 @@ import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.get.GetResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.index.IndexSettings;
+import org.opensearch.index.engine.DataFormatAwareEngine;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -20,6 +22,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
+
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 
 /**
  * End-to-end coverage for the batched primary-store read behind bulk partial updates.
@@ -54,6 +58,7 @@ public class DataFormatAwareBatchedUpdateGetIT extends AbstractCompositeEngineIT
             .putList("index.composite.secondary_data_formats", "lucene")
             .put(IndexMetadata.INDEX_APPEND_ONLY_ENABLED_SETTING.getKey(), false)
             .put("index.refresh_interval", -1)
+            .put(IndexSettings.BATCHED_UPDATE_GET_ENABLED_SETTING.getKey(), true)
             .build();
         client().admin()
             .indices()
@@ -76,6 +81,23 @@ public class DataFormatAwareBatchedUpdateGetIT extends AbstractCompositeEngineIT
 
     private static void assertNoBulkFailures(BulkResponse response) {
         assertFalse(response.buildFailureMessage(), response.hasFailures());
+    }
+
+    /**
+     * Asserts the read-ahead actually ran and was consumed, so a silent fallback cannot pass for
+     * the optimization. Every failure inside {@code prefetchUpdateGets} is caught and logged at
+     * debug, by design: the per-document get still produces the right document, so correctness
+     * assertions alone stay green while the batched path is disabled or broken. Only these counters
+     * separate "the batch read the rows" from "every document was read one at a time".
+     */
+    private void assertPrefetchServedUpdates(String indexName, int minUpdates) {
+        DataFormatAwareEngine engine = getEngine(indexName);
+        assertThat("rows must be read ahead for the bulk's updates", engine.prefetchedDocCount(), greaterThanOrEqualTo((long) minUpdates));
+        assertThat(
+            "the reads must be served from the read-ahead cache",
+            engine.prefetchHitCount(),
+            greaterThanOrEqualTo((long) minUpdates)
+        );
     }
 
     private static String id(int i) {
@@ -118,6 +140,7 @@ public class DataFormatAwareBatchedUpdateGetIT extends AbstractCompositeEngineIT
             assertEquals("untouched note for " + id(i), "note-" + i, source.get("note"));
             assertEquals("version after one update", 2L, got.getVersion());
         }
+        assertPrefetchServedUpdates(INDEX, docs);
     }
 
     /**
@@ -411,6 +434,7 @@ public class DataFormatAwareBatchedUpdateGetIT extends AbstractCompositeEngineIT
             assertEquals("unrequested doc " + id(i) + " must keep its seeded value", i, value(got));
             assertEquals("version of an unrequested doc", 1L, got.getVersion());
         }
+        assertPrefetchServedUpdates(INDEX, updated.size());
     }
 
     /**
@@ -427,6 +451,7 @@ public class DataFormatAwareBatchedUpdateGetIT extends AbstractCompositeEngineIT
             .putList("index.composite.secondary_data_formats", "lucene")
             .put(IndexMetadata.INDEX_APPEND_ONLY_ENABLED_SETTING.getKey(), false)
             .put("index.refresh_interval", -1)
+            .put(IndexSettings.BATCHED_UPDATE_GET_ENABLED_SETTING.getKey(), true)
             .put("index.parquet.row_group_max_rows", rowGroupRows)
             .put("index.parquet.page_row_limit", pageRows)
             .build();
@@ -454,6 +479,7 @@ public class DataFormatAwareBatchedUpdateGetIT extends AbstractCompositeEngineIT
             .putList("index.composite.secondary_data_formats", "lucene")
             .put(IndexMetadata.INDEX_APPEND_ONLY_ENABLED_SETTING.getKey(), false)
             .put("index.refresh_interval", -1)
+            .put(IndexSettings.BATCHED_UPDATE_GET_ENABLED_SETTING.getKey(), true)
             .build();
         List<String> mapping = new ArrayList<>(List.of("name", "type=keyword", "value", "type=integer", "note", "type=keyword"));
         for (int t = 0; t < threads; t++) {
