@@ -119,8 +119,15 @@ pub async fn read_rows_at_positions(
         .parquet
         .schema_force_view_types
     {
-        Arc::new(crate::schema_coerce::transform_schema_to_view_recursive(
-            &file_schema,
+        // Mirror the two steps the table path applies at registration (session_context.rs:
+        // transform_schema_to_view_recursive then coerce_inferred_schema): view-transform so
+        // string columns decode as Utf8View exactly as the per-document get produced, then
+        // coerce the types DataFusion has no Binary<->BinaryView equivalence for. Declaring the
+        // coerced schema here means the scan is built as its own output schema, so the relabel
+        // below is a no-op rather than an impossible BinaryView -> Binary conversion (_id is
+        // binary in every composite index, so without this the path fails on every call).
+        crate::schema_coerce::coerce_inferred_schema(Arc::new(
+            crate::schema_coerce::transform_schema_to_view_recursive(&file_schema),
         ))
     } else {
         file_schema

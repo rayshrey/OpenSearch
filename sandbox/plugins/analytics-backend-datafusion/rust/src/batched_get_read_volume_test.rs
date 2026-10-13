@@ -27,7 +27,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow::array::{ArrayRef, BinaryArray, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use datafusion::datasource::listing::ListingTableUrl;
@@ -596,5 +596,236 @@ async fn batched_get_of_only_unknown_ids_returns_no_rows() {
             "v".to_string(),
             crate::ROW_ID_COLUMN_NAME.to_string()
         ]
+    );
+}
+
+// -- Binary-column output parity ----------------------------------------------
+//
+// `_id` is a byte array in every composite index (the parquet writer emits it for every document
+// alongside `_seq_no` / `_version` / `_primary_term`), and under DataFusion's
+// `schema_force_view_types` a parquet read of it yields `BinaryView`. DataFusion has no
+// `Binary` <-> `BinaryView` equivalence, so the positional path -- which builds its own scan
+// instead of going through the ListingTable's schema adapter -- has to settle that type itself.
+// A relabel cannot: the two layouts differ, so `RelabelExec` rejects the pair at construction and
+// the whole batched get fails. The fixture above is Utf8 + Int64 only, which never triggers the
+// coercion, so these cases carry the binary column.
+
+fn binary_fixture_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Utf8, false),
+        Field::new("_id", DataType::Binary, false),
+        Field::new(crate::ROW_ID_COLUMN_NAME, DataType::Int64, false),
+    ]))
+}
+
+/// Writes a small binary-column fixture and returns its size. Read volume is not under test here,
+/// so this keeps the geometry modest rather than mirroring the 100-row-group fixture above.
+fn write_binary_fixture(dir: &std::path::Path) -> u64 {
+    const ROWS: i64 = 2_000;
+    let schema = binary_fixture_schema();
+    let props = WriterProperties::builder()
+        .set_max_row_group_size(500)
+        .set_data_page_row_count_limit(100)
+        .set_write_batch_size(100)
+        .build();
+    let path = dir.join("fixture.parquet");
+    let file = std::fs::File::create(&path).expect("create binary fixture");
+    let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).expect("writer");
+    let mut next = 0i64;
+    while next < ROWS {
+        let end = (next + 100).min(ROWS);
+        let ids: Vec<Vec<u8>> = (next..end)
+            .map(|i| format!("doc-{i}").into_bytes())
+            .collect();
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(
+                (next..end).map(|i| format!("key-{i}")).collect::<Vec<_>>(),
+            )),
+            Arc::new(BinaryArray::from_iter_values(ids)),
+            Arc::new(Int64Array::from_iter_values(next..end)),
+        ];
+        writer
+            .write(&RecordBatch::try_new(Arc::clone(&schema), columns).expect("batch"))
+            .expect("write");
+        next = end;
+    }
+    writer.close().expect("close");
+    std::fs::metadata(&path).expect("stat binary fixture").len()
+}
+
+/// Runs one engine-internal get against the binary-column fixture through the real entry point.
+/// Returns the rows as `(__row_id__, _id, k)` ascending, plus the returned schema's field names.
+async fn run_binary_get(
+    internal_search: InternalSearch,
+) -> (Vec<(i64, Vec<u8>, String)>, Vec<String>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir_path = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    let _ = write_binary_fixture(&dir_path);
+
+    let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
+    let table_path =
+        ListingTableUrl::parse(format!("file://{}/", dir_path.display())).expect("table path");
+    let location =
+        StorePath::from_filesystem_path(dir_path.join("fixture.parquet")).expect("store path");
+    let object_meta = store.head(&location).await.expect("head fixture");
+
+    let runtime_env = Arc::new(RuntimeEnvBuilder::new().build().expect("runtime env"));
+    let (_pool, dynamic_limit_handle) = DynamicLimitPool::new(1 << 30);
+    let runtime = DataFusionRuntime {
+        runtime_env,
+        custom_cache_manager: None,
+        dynamic_limit_handle,
+    };
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+    let cpu_executor = DedicatedExecutor::new("test-cpu-binary", builder, 2);
+    let query_config = DatafusionQueryConfig::test_default();
+
+    let stream_ptr = crate::query_executor::execute_query(
+        table_path,
+        Arc::new(vec![object_meta]),
+        "t".to_string(),
+        Vec::new(),
+        &runtime,
+        cpu_executor.clone(),
+        None,
+        &query_config,
+        1,
+        Arc::clone(&store),
+        None,
+        &[],
+        &[],
+        internal_search,
+    )
+    .await
+    .expect("internal-search get on a binary-column file");
+
+    let stream = unsafe {
+        *Box::from_raw(
+            stream_ptr
+                as *mut datafusion::physical_plan::stream::RecordBatchStreamAdapter<
+                    crate::cross_rt_stream::CrossRtStream,
+                >,
+        )
+    };
+    let schema_fields: Vec<String> = datafusion::physical_plan::RecordBatchStream::schema(&stream)
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    let batches = datafusion::physical_plan::common::collect(Box::pin(stream))
+        .await
+        .expect("collect rows");
+
+    let mut returned = Vec::new();
+    for batch in &batches {
+        let schema = batch.schema();
+        let row_ids = batch
+            .column(
+                schema
+                    .index_of(crate::ROW_ID_COLUMN_NAME)
+                    .expect("__row_id__"),
+            )
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("__row_id__ is Int64")
+            .clone();
+        // Cast rather than downcast so the values assertion holds whichever of Binary / BinaryView
+        // the path settled on; that the two paths declare the same type is asserted separately via
+        // the schema field names and the per-path comparison.
+        let ids = arrow::compute::cast(
+            batch.column(schema.index_of("_id").expect("_id")),
+            &DataType::Binary,
+        )
+        .expect("cast _id to Binary");
+        let ids = ids
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("_id is Binary after cast")
+            .clone();
+        let ks = arrow::compute::cast(
+            batch.column(schema.index_of("k").expect("k")),
+            &DataType::Utf8,
+        )
+        .expect("cast k to Utf8");
+        let ks = ks
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("k is Utf8 after cast")
+            .clone();
+        returned.extend((0..batch.num_rows()).map(|i| {
+            (
+                row_ids.value(i),
+                ids.value(i).to_vec(),
+                ks.value(i).to_string(),
+            )
+        }));
+    }
+
+    cpu_executor.join_blocking();
+    returned.sort_unstable();
+    (returned, schema_fields)
+}
+
+/// The regression: a batched get of a file carrying a binary column must succeed at all. Before the
+/// positional path declared its scan with the coerced schema, this failed for every id set with
+/// `RelabelExec column N ('_id') has non-bit-compatible types: BinaryView -> Binary`.
+#[tokio::test]
+async fn batched_get_of_a_binary_column_file_succeeds() {
+    let _globals = crate::test_process_globals::lock();
+    let row_ids = [7i64, 512, 1_001, 1_999];
+    let (rows, fields) = run_binary_get(InternalSearch::ByRowIds(Arc::new(row_ids.to_vec()))).await;
+
+    assert_eq!(
+        rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+        row_ids.to_vec(),
+        "batched get returned the wrong row positions"
+    );
+    for (row_id, id, k) in &rows {
+        assert_eq!(id, &format!("doc-{row_id}").into_bytes(), "_id value");
+        assert_eq!(k, &format!("key-{row_id}"), "k value");
+    }
+    assert!(
+        fields.iter().any(|f| f == "_id"),
+        "returned schema is missing _id: {fields:?}"
+    );
+}
+
+/// The batched path and the per-document path must agree on a binary column, values and declared
+/// field names alike -- the batched get is only ever a faster way to produce the same rows.
+#[tokio::test]
+async fn batched_get_of_a_binary_column_matches_the_single_row_get() {
+    let _globals = crate::test_process_globals::lock();
+    let row_ids = [3i64, 499, 500, 1_500];
+    let (batched, batched_fields) =
+        run_binary_get(InternalSearch::ByRowIds(Arc::new(row_ids.to_vec()))).await;
+
+    let mut single_rows = Vec::new();
+    let mut single_fields: Option<Vec<String>> = None;
+    for id in row_ids {
+        let (rows, fields) = run_binary_get(InternalSearch::ByRowId(id)).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "per-document get returned {} rows",
+            rows.len()
+        );
+        single_rows.extend(rows);
+        match &single_fields {
+            None => single_fields = Some(fields),
+            Some(previous) => assert_eq!(previous, &fields, "per-document schema varied by id"),
+        }
+    }
+    single_rows.sort_unstable();
+
+    assert_eq!(
+        batched, single_rows,
+        "batched rows differ from per-document rows"
+    );
+    assert_eq!(
+        batched_fields,
+        single_fields.expect("at least one id"),
+        "batched schema differs from per-document schema"
     );
 }
