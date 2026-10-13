@@ -2645,13 +2645,13 @@ public class DataFormatAwareEngine implements Indexer {
         return cached.generation() == prefetchCacheGeneration.get() ? cached.result() : null;
     }
 
-    // visible for tests
-    long prefetchHitCount() {
+    /** Reads served from the read-ahead cache. Visible for tests, including out-of-package ITs. */
+    public long prefetchHitCount() {
         return numPrefetchHits.count();
     }
 
-    // visible for tests
-    long prefetchedDocCount() {
+    /** Rows parked by {@link #prefetchUpdateGets}. Visible for tests, including out-of-package ITs. */
+    public long prefetchedDocCount() {
         return numPrefetchedDocs.count();
     }
 
