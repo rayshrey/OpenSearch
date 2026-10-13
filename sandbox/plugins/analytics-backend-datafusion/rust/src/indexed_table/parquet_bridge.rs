@@ -226,6 +226,20 @@ fn create_stream_with_access_plan(
     access_plan: ParquetAccessPlan,
     push_predicate: bool,
 ) -> Result<(SendableRecordBatchStream, Arc<dyn ExecutionPlan>)> {
+    let exec = create_exec_with_access_plan(config, access_plan, push_predicate)?;
+    let ctx = Arc::new(datafusion::execution::TaskContext::default());
+    let stream = exec.execute(0, ctx)?;
+    Ok((stream, exec))
+}
+
+/// Build the parquet scan for an access plan without executing it, for callers that need to wrap
+/// or inspect the plan first (e.g. output-schema retagging). [`create_stream_with_access_plan`] is
+/// this plus `execute(0, ..)`.
+pub fn create_exec_with_access_plan(
+    config: &RowGroupStreamConfig,
+    access_plan: ParquetAccessPlan,
+    push_predicate: bool,
+) -> Result<Arc<dyn ExecutionPlan>> {
     let partitioned_file = PartitionedFile::new(config.file_path.clone(), config.file_size)
         .with_extensions(Arc::new(access_plan));
 
@@ -261,10 +275,7 @@ fn create_stream_with_access_plan(
         config_builder = config_builder.with_projection_indices(Some(proj.clone()))?;
     }
 
-    let exec: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(config_builder.build());
-    let ctx = Arc::new(datafusion::execution::TaskContext::default());
-    let stream = exec.execute(0, ctx)?;
-    Ok((stream, exec))
+    Ok(DataSourceExec::from_data_source(config_builder.build()))
 }
 
 /// Factory that creates parquet readers with pre-cached metadata.

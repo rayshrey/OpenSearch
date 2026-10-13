@@ -41,6 +41,7 @@ pub mod native_error;
 pub mod partition_stream;
 pub mod patterns;
 pub mod phantom_corrector;
+pub mod positional_get;
 pub mod project_row_id_analyzer;
 pub mod project_row_id_optimizer;
 pub mod query_budget;
@@ -76,6 +77,13 @@ mod test_process_globals;
 
 #[cfg(test)]
 mod spill_e2e_test;
+
+// Read-volume tests for the batched engine-internal get (`InternalSearch::ByRowIds`), the bulk
+// update prefetch's row read. Here rather than beside the implementation because they drive the
+// whole `query_executor::execute_query` entry point against a real parquet file and a counting
+// object store.
+#[cfg(test)]
+mod batched_get_read_volume_test;
 
 // End-to-end TieredObjectStore + TieredBlockCache integration tests. Located here
 // (not in the lower-level `opensearch-tiered-storage` crate) because they drive a
